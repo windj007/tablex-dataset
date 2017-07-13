@@ -10,10 +10,10 @@ fi
 
 
 CMD="docker"
-#if which nvidia-docker
-#then
-#    CMD="nvidia-docker"
-#fi
+if which nvidia-docker
+then
+    CMD="nvidia-docker"
+fi
 
 $CMD run -ti --rm \
     -e "HASHED_PASSWORD=$YOUR_HASHED_PASSWORD" \

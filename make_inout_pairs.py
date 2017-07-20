@@ -30,8 +30,8 @@ def set_fill_opacity(style, value):
     else:
         return style + ('' if style.endswith(';') else ';') + new_fill_opacity
 
-
-for page_with_markup_file in glob.glob('/notebook/data/3_prepared_images/*.svg'):
+    
+def convert_svg(page_with_markup_file, out_dir):
     fname = os.path.splitext(os.path.basename(page_with_markup_file))[0]
 
     with open(page_with_markup_file) as f:
@@ -41,11 +41,12 @@ for page_with_markup_file in glob.glob('/notebook/data/3_prepared_images/*.svg')
     image_element = next(iter(n for n in svg.getchildren() if n.tag.endswith('image')))
     dataurl = image_element.get('{http://www.w3.org/1999/xlink}href')
     png_content = base64.b64decode(dataurl.rsplit(',', 1)[1])
-    with open('/notebook/data/4_inout_pairs/{}_in.png'.format(fname), 'wb') as f:
+    in_fname = os.path.join(out_dir, '{}_in.png'.format(fname))
+    with open(in_fname, 'wb') as f:
         f.write(png_content)
 
-    svg_fname = '/notebook/data/4_inout_pairs/{}_out.svg'.format(fname)
-    out_fname = '/notebook/data/4_inout_pairs/{}_out.png'.format(fname)
+    svg_fname = os.path.join(out_dir, '{}_out.svg'.format(fname))
+    out_fname = os.path.join(out_dir, '{}_out.png'.format(fname))
 
     if REMOVE_LINES:
         for n in svg.getchildren():
@@ -81,3 +82,13 @@ for page_with_markup_file in glob.glob('/notebook/data/3_prepared_images/*.svg')
 
     out_img = Image.open(out_fname).convert('RGB')
     out_img.save(out_fname)
+    return in_fname, out_fname
+
+
+def make_inout_pairs(in_dir='/notebook/data/3_prepared_images/', out_dir='/notebook/data/4_inout_pairs/'):
+    for page_with_markup_file in glob.glob(os.path.join(in_dir, '*.svg')):
+        convert_svg(page_with_markup_file, out_dir)
+
+
+if __name__ == '__main__':
+    make_inout_pairs()

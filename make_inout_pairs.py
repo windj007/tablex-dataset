@@ -8,29 +8,44 @@ STROKE_RE = re.compile(r'stroke\s*:\s*#([0-9a-f]{6})', re.I)
 FILL_RE = re.compile(r'fill\s*:\s*([^;]+)[;$]', re.I)
 FILL_OPACITY_RE = re.compile(r'fill-opacity\s*:\s*([^;]+)[;$]', re.I)
 
-def get_stroke(style):
-    stroke = STROKE_RE.search(style)
-    return stroke.group(1) if stroke else '000000'
-
-
-def set_fill(style, color):
-    fill = FILL_RE.search(style)
-    new_fill = 'fill:#{};'.format(color)
-    if fill:
-        return FILL_RE.sub(new_fill, style)
+def get_stroke(node):
+    stroke = node.get('stroke', None)
+    if not stroke is None:
+        return stroke.strip(' #')
     else:
-        return style + ('' if style.endswith(';') else ';') + new_fill
+        style = node.get('style', '')
+        stroke = STROKE_RE.search(style)
+        return stroke.group(1) if stroke else '000000'
 
 
-def set_fill_opacity(style, value):
-    fill_opacity = FILL_OPACITY_RE.search(style)
-    new_fill_opacity = 'fill-opacity:{};'.format(value)
-    if fill_opacity:
-        return FILL_OPACITY_RE.sub(new_fill_opacity, style)
+def set_fill(node, color):
+    if not node.get('fill', None) is None:
+        node.set('fill', '#{}'.format(color))
     else:
-        return style + ('' if style.endswith(';') else ';') + new_fill_opacity
+        style = node.get('style', '')
+        fill = FILL_RE.search(style)
+        new_fill = 'fill:#{};'.format(color)
+        if fill:
+            new_style = FILL_RE.sub(new_fill, style)
+        else:
+            new_style = style + ('' if style.endswith(';') else ';') + new_fill
+        node.set('style', new_fill)
 
-    
+
+def set_fill_opacity(node, value):
+    if not node.get('fill-opacity', None) is None:
+        node.set('fill-opacity', value)
+    else:
+        style = node.get('style', '')
+        fill_opacity = FILL_OPACITY_RE.search(style)
+        new_fill_opacity = 'fill-opacity:{};'.format(value)
+        if fill_opacity:
+            new_style = FILL_OPACITY_RE.sub(new_fill_opacity, style)
+        else:
+            new_style = style + ('' if style.endswith(';') else ';') + new_fill_opacity
+        node.set('style', new_style)
+
+
 def convert_svg(page_with_markup_file, out_dir):
     fname = os.path.splitext(os.path.basename(page_with_markup_file))[0]
 
@@ -55,13 +70,12 @@ def convert_svg(page_with_markup_file, out_dir):
 
     for n in list(svg.getchildren()):
         if n.tag.endswith('rect'):
-            style = n.get('style') or ''
-            stroke = get_stroke(style)
-            if stroke != '000000':
-                n.set('style', set_fill(style, stroke))
-            elif stroke == '000000':
-                n.set('style', set_fill(style, 'ffffff'))
-            n.set('style', set_fill_opacity(n.get('style'), '1'))
+            stroke = get_stroke(n)
+            if stroke in ('000000', 'black'):
+                set_fill(n, 'ffffff')
+            else:
+                set_fill(n, stroke)
+            set_fill_opacity(n, '1')
 
     size = (int(svg.get('height')), int(svg.get('width')))
     bg_image = Image.fromarray(numpy.zeros(size, dtype='uint8'),
@@ -78,7 +92,7 @@ def convert_svg(page_with_markup_file, out_dir):
     with open(svg_fname, 'w') as f:
         f.write(lxml.etree.tostring(src_tree).decode('utf8'))
     subprocess.run(['convert', svg_fname, '-antialias', out_fname])
-    os.remove(svg_fname)
+    # os.remove(svg_fname)
 
     out_img = Image.open(out_fname).convert('RGB')
     out_img.save(out_fname)

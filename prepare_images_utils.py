@@ -29,7 +29,7 @@ def la_to_l(image, color=255):
     return background
 
 
-def load_image_to_array(fname, proc=identity, mode=None):
+def load_image_opaque(fname, mode='RGB'):
     img = Image.open(fname)
     if not mode is None and img.mode != mode:
         if img.mode == 'LA':
@@ -37,7 +37,11 @@ def load_image_to_array(fname, proc=identity, mode=None):
         elif img.mode == 'RGBA':
             img = rgba_to_rgb(img)
         img = img.convert(mode)
-    return proc(numpy.array(img))
+    return img
+
+
+def load_image_to_array(fname, proc=identity, mode=None):
+    return proc(numpy.array(load_image_opaque(fname, mode=mode)))
 
 
 footer  = numpy.array([255,   0,   0,   0], dtype='uint8')

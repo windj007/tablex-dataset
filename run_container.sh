@@ -21,5 +21,8 @@ $CMD run -ti --rm \
     -v `pwd`/certs:/jupyter/certs \
     -v `pwd`:/notebook \
     $BIND_PORT \
+    -m 20G \
+    --name tablex \
+    --memory-swappiness 0 \
     tablex-dataset \
     $@

@@ -11,11 +11,25 @@ FILL_OPACITY_RE = re.compile(r'fill-opacity\s*:\s*([^;]+)[;$]', re.I)
 def get_stroke(node):
     stroke = node.get('stroke', None)
     if not stroke is None:
-        return stroke.strip(' #')
+        return stroke.strip(' #').lower()
     else:
         style = node.get('style', '')
         stroke = STROKE_RE.search(style)
-        return stroke.group(1) if stroke else '000000'
+        return stroke.group(1).lower() if stroke else '000000'
+
+
+def set_stroke(node, color):
+    if not node.get('stroke', None) is None:
+        node.set('stroke', '#{}'.format(color))
+    else:
+        style = node.get('style', '')
+        stroke = STROKE_RE.search(style)
+        new_stroke = 'stroke:#{};'.format(color)
+        if stroke:
+            new_style = STROKE_RE.sub(new_stroke, style)
+        else:
+            new_style = style + ('' if style.endswith(';') else ';') + new_stroke
+        node.set('style', new_style)
 
 
 def set_fill(node, color):
@@ -29,7 +43,7 @@ def set_fill(node, color):
             new_style = FILL_RE.sub(new_fill, style)
         else:
             new_style = style + ('' if style.endswith(';') else ';') + new_fill
-        node.set('style', new_fill)
+        node.set('style', new_style)
 
 
 def set_fill_opacity(node, value):
@@ -44,6 +58,18 @@ def set_fill_opacity(node, value):
         else:
             new_style = style + ('' if style.endswith(';') else ';') + new_fill_opacity
         node.set('style', new_style)
+
+
+FILL_MAPPING = (
+    (re.compile('ff[0-4]{4}'), 'ff0000'),
+    (re.compile('[0-4]{2}ff[0-4]{2}'), 'ff0000'),
+    (re.compile('000000|black'), '00ff00'),
+)
+def map_fill(stroke):
+    for regex, result in FILL_MAPPING:
+        if regex.search(stroke):
+            return result
+    return stroke
 
 
 def convert_svg(page_with_markup_file, out_dir):
@@ -71,10 +97,9 @@ def convert_svg(page_with_markup_file, out_dir):
     for n in list(svg.getchildren()):
         if n.tag.endswith('rect'):
             stroke = get_stroke(n)
-            if stroke in ('000000', 'black'):
-                set_fill(n, 'ffffff')
-            else:
-                set_fill(n, stroke)
+            new_fill = map_fill(stroke)
+            set_fill(n, new_fill)
+            set_stroke(n, new_fill)
             set_fill_opacity(n, '1')
 
     size = (int(svg.get('height')), int(svg.get('width')))

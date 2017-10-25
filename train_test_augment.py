@@ -9,7 +9,10 @@ OUT_SUFFIX = '_out.png'
 TRAIN_SIZE = 0.7
 VAL_SIZE = 0.2
 
-WINDOW_SIZE = (500, 500)
+RESIZE_TO_X = 500
+RESIZE_TO_Y_FACTOR = 1.32
+RESIZE_TO = (RESIZE_TO_X, int(RESIZE_TO_X * RESIZE_TO_Y_FACTOR))
+WINDOW_SIZE = RESIZE_TO
 STRIDE = (50, 50)
 OUT_SCALE_TO = (256, 256)
 OUT_MODE = 'RGB'
@@ -27,7 +30,11 @@ def augment_image_deterministic(fname, out_dir,
     else:
         base_id = base_fname
         kind = None
-    src_img = Image.open(fname) #.convert('RGB').convert(OUT_MODE)
+    src_img = Image.open(fname).resize(RESIZE_TO) #.convert('RGB').convert(OUT_MODE)
+    out_fname = os.path.join(out_dir,
+                             '_'.join((base_id, str(out_i)) + (() if kind is None else (kind,))) + '.png')
+    src_img.save(out_fname)
+    return [(1, 1, 0, 0, 0, out_fname)]
     #alpha = src_img.convert('RGBA').split()[-1]
     #bg = Image.new("RGBA", src_img.size, (255, 255, 255, 255))
     #bg.paste(src_img, mask=alpha)
@@ -79,9 +86,11 @@ def copy_all_svg(svg_dir, prefixes, target_dir):
     if not os.path.exists(target_dir):
         os.makedirs(target_dir)
     for prefix in prefixes:
-        shutil.copy2(os.path.join(svg_dir, prefix + '.svg'),
-                     os.path.join(target_dir, prefix + '.svg'))
-            
+        src_file = os.path.join(svg_dir, prefix + '.svg')
+        if os.path.exists(src_file):
+            shutil.copy2(src_file,
+                         os.path.join(target_dir, prefix + '.svg'))
+
 
 def shuffle_split(in_dir='/notebook/data/4_inout_pairs/', out_dir='/notebook/data/5_ready/', svg_dir='/notebook/data/3_prepared_images/', train_size=TRAIN_SIZE, val_size=VAL_SIZE):
     all_sample_names = list(set(os.path.basename(fname)[:-len(IN_SUFFIX)]

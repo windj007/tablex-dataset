@@ -80,16 +80,34 @@ def prepare_multioutput(image):
 
 
 def prepare_multioutput2(image):
-    return numpy.apply_along_axis(color_to_gold_output_join_fh, -1, image)
+    result = numpy.zeros(image.shape[:-1] + (3,), dtype='uint8')
+
+    body_mask = image.min(-1) > 200 # all > 200
+    body_x, body_y = numpy.where(body_mask)
+    result[body_x, body_y, 1] = 255
+
+    fh_mask = (image[:, :, :-1].max(-1) > 200) & ~body_mask
+    fh_x, fh_y = numpy.where(fh_mask) # at least one > 200
+    result[fh_x, fh_y, 0] = 255
+
+    result[:, :, 2] = 255 - result.sum(-1) # rest are nothing
+    return result
+    # return numpy.apply_along_axis(color_to_gold_output_join_fh, -1, image)
 
 
-def read_images_to_tensor(filenames, n_jobs=20, proc=identity, mode='RGB'):
+def prepare_multioutput3(image):
+    result = numpy.array(image)
+    result[:, :, -1] = 255 - result[:, :, :-1].sum(-1)
+    return result
+
+
+def read_images_to_tensor(filenames, n_jobs=-1, proc=identity, mode='RGB'):
     data = list(Parallel(n_jobs=n_jobs)(delayed(load_image_to_array)(fname, proc=proc, mode=mode)
                                         for fname in filenames))
     return numpy.stack(data).astype('float32') / 255.0
 
 
-def load_dataset(dirname, n_jobs=20, take_n=None, in_mode='L', out_mode='RGB', in_proc_func=identity, out_proc_func=prepare_multioutput2):
+def load_dataset(dirname, n_jobs=-1, take_n=None, in_mode='L', out_mode='RGB', in_proc_func=identity, out_proc_func=prepare_multioutput3):
     prefixes = [fname[:-7] for fname
                 in glob.glob(os.path.join(dirname, '*_in.png'))
                 #in glob.glob('./data/5_ready/train/12147373-0005_*in.png')
@@ -106,10 +124,10 @@ def load_dataset(dirname, n_jobs=20, take_n=None, in_mode='L', out_mode='RGB', i
     in_data = read_images_to_tensor(in_files, n_jobs=n_jobs, proc=in_proc_func, mode=in_mode)
     out_data = read_images_to_tensor(out_files, n_jobs=n_jobs, proc=out_proc_func, mode=out_mode)
     return (numpy.expand_dims(in_data, -1),
-            numpy.expand_dims(out_data, -1))
+            out_data)
 
 
-def convert_directory_to_hdf5(dirname, out_file, chunk_size=10000, n_jobs=20, in_mode='L', out_mode='RGB', in_proc_func=identity, out_proc_func=prepare_multioutput2, shuffle=True):
+def convert_directory_to_hdf5(dirname, out_file, chunk_size=10000, n_jobs=-1, in_mode='L', out_mode='RGB', in_proc_func=identity, out_proc_func=prepare_multioutput2, shuffle=True):
     prefixes = [fname[:-7] for fname
                 in glob.glob(os.path.join(dirname, '*_in.png'))
                 #in glob.glob('./data/5_ready/train/12147373-0005_*in.png')
@@ -131,8 +149,8 @@ def convert_directory_to_hdf5(dirname, out_file, chunk_size=10000, n_jobs=20, in
                                     mode=out_mode).shape
 
     with h5py.File(out_file, 'w') as f:
-        in_data = f.create_dataset('in_data', (samples_n,) + in_shape)
-        out_data = f.create_dataset('out_data', (samples_n,) + out_shape)
+        in_data = f.create_dataset('in_data', (samples_n,) + in_shape, chunks=True)
+        out_data = f.create_dataset('out_data', (samples_n,) + out_shape, chunks=True)
 
         for chunk_start in range(0, samples_n, chunk_size):
             chunk_end = min(chunk_start + chunk_size, samples_n)

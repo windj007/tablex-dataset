@@ -14,7 +14,7 @@ with open('./good_papers.lst', 'r') as f:
     good_papers = set(line.strip() for line in f)
 
 
-joblib.Parallel(n_jobs=10)(
+joblib.Parallel(n_jobs=20)(
     joblib.delayed(pdf2samples_apply)(arc)
     for arc in good_papers
 )

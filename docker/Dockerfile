@@ -28,3 +28,4 @@ RUN apt-get install -yqq imagemagick latexmk \
 RUN pip install svgwrite Pillow opencv-python tabula-py pdfquery \
     git+https://github.com/windj007/TexSoup timeout-decorator ngram \
     git+https://github.com/windj007/imgaug
+RUN pip uninstall -y imgaug && pip install -U imgaug

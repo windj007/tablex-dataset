@@ -23,12 +23,13 @@ def gen_word(mean=WORD_LEN_MEAN, std=WORD_LEN_STD):
 
 LONG_TEXT_MAX_LINE = 3
 FORCE_LINE_BREAK = r'\\'
-def gen_long_text(words_n=None, max_len=10, line_len = LONG_TEXT_MAX_LINE, wrap_makecell=True):
+def gen_long_text(words_n=None, max_len=3, line_len = LONG_TEXT_MAX_LINE, wrap_makecell=True):
     if words_n is None:
         words_n = numpy.random.randint(2, max_len)
     words = [el
              for i in range(words_n)
-             for el in [gen_word(),] + ([FORCE_LINE_BREAK] if (i + 1) % line_len == 0 else [])]
+             for el in [gen_word(),] #+ ([FORCE_LINE_BREAK] if (i + 1) % line_len == 0 else [])
+            ]
     if words[-1] == FORCE_LINE_BREAK:
         words = words[:-1]
     content = ' '.join(words)
@@ -56,13 +57,13 @@ def gen_align():
 
 
 BORDERS = ['|', ' ']
-BORDERS_P = [1.0, 0.0]
+BORDERS_P = [0.5, 0.5]
 def gen_borders():
     return numpy.random.choice(BORDERS, p=BORDERS_P)
 
 
 HEADER_TYPES = ['atomic', 'composite']
-HEADER_TYPES_P = [0.9, 0.1]
+HEADER_TYPES_P = [1.0, 0.0]
 Header = collections.namedtuple('Header',
                                 'type title content_type children format'.split(' '))
 def gen_header():
@@ -71,7 +72,10 @@ def gen_header():
     formatting = dict(align=gen_align(),
                       borders=gen_borders())
     if header_type == 'atomic':
-        return Header(header_type, title, gen_content_type(), [], formatting)
+        ct = gen_content_type()
+        if ct == 'long_text':
+            formatting['align'] = 'c'
+        return Header(header_type, title, ct, [], formatting)
     elif header_type == 'composite':
         children_n = gen_header_children_n()
         children = [gen_header() for _ in range(children_n)]

@@ -60,15 +60,15 @@ def boxes_to_mask(page_image, boxes):
                             dtype='uint8')
     for cls, box in boxes:
         y1, x1, y2, x2 = box
-        
+
         cv2.drawContours(demo_mask,
                          [numpy.array([(x1, y1),
                                        (x2, y1),
                                        (x2, y2),
-                                       (x1, y2)])],
+                                       (x1, y2)]).astype('int')],
                          -1,
                          tuple(CLS_TO_COLOR[cls]),
-#                          cv2.FILLED
+                         # cv2.FILLED
                         )
     return arr_to_img(demo_mask.astype('float32') / 255.0)
 
@@ -438,7 +438,7 @@ def pdf_latex_to_samples(paper_id,
         segments_by_page = collections.defaultdict(list)
         objects = list(synctex_positions_getter(parse_tree))
         objects.sort(key=lambda t: t[0])
-        for category, is_atomic, obj, tokens in objects:
+        for category, is_atomic, obj, tokens, groupings in objects:
             if is_atomic:
                 obj_boxes_by_page = collections.defaultdict(list)
                 for line_to_show, char_to_show in obj:
@@ -465,11 +465,20 @@ def pdf_latex_to_samples(paper_id,
                             obj_boxes_by_page[page].extend(boxes)
                 assert len(obj_boxes_by_page) <= 1
                 page, boxes = next(iter(obj_boxes_by_page.items()))
-                for part_boxes, part_tokens in zip(reassign_boxes(pdf, page, boxes, tokens),
-                                                   tokens):
+                assigned_boxes = reassign_boxes(pdf, page, boxes, tokens)
+                for part_boxes, part_tokens in zip(assigned_boxes, tokens):
                     for box in boxes_aggregator(pdf, page, part_boxes, part_tokens):
                         segments_by_page[page].append((category, box))
-
+                for group_category, group_elems in groupings:
+                    group_boxes = [box
+                                   for elem_i in group_elems
+                                   for box in assigned_boxes[elem_i]]
+                    group_tokens = [tok
+                                    for elem_i in group_elems
+                                    for tok_list in tokens
+                                    for tok in tok_list]
+                    for box in boxes_aggregator(pdf, page, group_boxes, group_tokens):
+                        segments_by_page[page].append((group_category, box))
 
         
         for page, segments_with_categories in segments_by_page.items():
@@ -681,14 +690,16 @@ def get_table_info(soup):
                            True,
                            [soup.char_pos_to_line(tok.position)
                             for tok in get_all_tokens(elem)],
-                           [tok.text for tok in get_all_tokens(elem, False)])
+                           [tok.text for tok in get_all_tokens(elem, False)],
+                           [])
         else:
             found_some_content = True
             yield (1,
                    True,
                    [soup.char_pos_to_line(tok.position)
                     for tok in get_all_tokens(tabular)],
-                   [tok.text for tok in get_all_tokens(tabular, False)])
+                   [tok.text for tok in get_all_tokens(tabular, False)],
+                   [])
 
         if found_some_content:
             caption = table.caption
@@ -700,20 +711,25 @@ def get_table_info(soup):
                        [tok.text for tok in get_all_tokens(caption, False)])
             try:
                 parsed_table = structurize_tabular_contents(tabular)
+
+                cell_positions = []
+                cell_tokens = []
+                row_groups = [(3, []) for _ in parsed_table.rows]
+                col_groups = [(4, []) for _ in parsed_table.rows[0]]
+                cur_cell_i = 0
+                for row_i, row in enumerate(parsed_table.rows):
+                    for col_i, cell in enumerate(row):
+                        cell_positions.append([soup.char_pos_to_line(tok.position) for tok in get_all_tokens(cell)])
+                        cell_tokens.append(list(get_all_tokens(cell, False)))
+                        row_groups[row_i][1].append(cur_cell_i)
+                        col_groups[col_i][1].append(cur_cell_i)
+                        cur_cell_i += 1
+                    
                 yield (2,
                        False,
-                       [[soup.char_pos_to_line(tok.position) for tok in get_all_tokens(cell)]
-                        for row in parsed_table.rows
-                        for cell in row],
-                       [list(get_all_tokens(cell, False))
-                        for row in parsed_table.rows
-                        for cell in row])
-#                 for row in parsed_table.rows:
-#                     yield (2,
-#                            False,
-#                            [[soup.char_pos_to_line(tok.position) for tok in get_all_tokens(cell)]
-#                             for cell in row],
-#                            [list(get_all_tokens(cell, False)) for cell in row])
+                       cell_positions,
+                       cell_tokens,
+                       row_groups + col_groups)
             except:
                 print(traceback.format_exc())
 
@@ -767,13 +783,27 @@ NGRAM_SIM_WEIGHTS = (
     (2, 0.05),
     (1, 0.05)
 )
-def ngram_dist(a, b, empty_res = 100):
-    if not (a and b):
+FUZZY_DIST_PENALTY = 0.3
+def ngram_dist(cell_txt, box_txt, empty_res=100):
+    if not (cell_txt and box_txt):
         return empty_res
+    if cell_txt == box_txt:
+        return 0
     result = 0
     for ngram_len, weight in NGRAM_SIM_WEIGHTS:
-        result += weight * ngram.NGram.compare(a, b)
-    return 1.0 - result
+        result += weight * ngram.NGram.compare(box_txt, box_txt, N=ngram_len)
+    return 1.0 - result + FUZZY_DIST_PENALTY
+
+
+FORCE_LINE_BREAK = r'\\'
+def multiline_ngram_dist(cell_txt, box_txt, empty_res=100):
+    if FORCE_LINE_BREAK in cell_txt:
+        lines = cell_txt.split(FORCE_LINE_BREAK)
+        return min(ngram_dist(line.strip(), box_txt, empty_res=empty_res)
+                   for line in lines
+                   if line.strip())
+    else:
+        return ngram_dist(cell_txt, box_txt, empty_res=empty_res)
 
 
 def reassign_boxes(pdf, page_i, found_boxes, cells,
@@ -797,7 +827,7 @@ def reassign_boxes(pdf, page_i, found_boxes, cells,
 #     print('cell_texts', cell_texts)
     cell_allows_multiple_boxes = [r'\\' in t for t in cell_texts]
 
-    text_dist = numpy.array([[ngram_dist(ct, bt) for bt in box_texts]
+    text_dist = numpy.array([[multiline_ngram_dist(ct, bt) for bt in box_texts]
                              for ct in cell_texts])
 
     cur_cell_centers = numpy.broadcast_to(mean_box_center.mean(0), (len(cell_texts), 2))

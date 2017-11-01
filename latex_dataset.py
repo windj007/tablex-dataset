@@ -283,7 +283,7 @@ class PdfMinerWrapper(object):
         return device.get_result(), page
 
     def get_boxes(self, page_no, gold_bboxes):
-        yield from self.__get_boxes(self.get_page(page_no)[0], gold_bboxes)
+        return self.__get_boxes(self.get_page(page_no)[0], gold_bboxes)
 
     def get_text(self, page_no, gold_bboxes, glue=''):
         elems = list(self.get_boxes(page_no, gold_bboxes))
@@ -299,7 +299,8 @@ class PdfMinerWrapper(object):
             return
         if not isinstance(root, LTChar):
             for ch in root:
-                yield from self.__get_boxes(ch, gold_boxes)
+                for b in self.__get_boxes(ch, gold_boxes):
+                    yield b
 
     def __enter__(self):
         self.load()
@@ -564,7 +565,8 @@ def get_all_tokens(root, include_command_names=True, tokenize=True):
                 yield root.name
 
         for ch in root.contents:
-            yield from get_all_tokens(ch, include_command_names=include_command_names, tokenize=tokenize)
+            for tok in get_all_tokens(ch, include_command_names=include_command_names, tokenize=tokenize):
+                yield tok
 
 
 AMP_RE = re.compile(r'(^|[^\\\d])(&)')

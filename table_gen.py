@@ -97,17 +97,20 @@ def iter_over_atomic_headers(headers):
         if h.type == 'atomic':
             yield h
         else:
-            yield from iter_over_atomic_headers(h.children)
+            for h in iter_over_atomic_headers(h.children):
+                yield h
 
 
 def iter_over_headers_on_depth(headers, target_depth):
     if target_depth < 0:
         return
     if target_depth == 0:
-        yield from headers
+        for h in headers:
+            yield h
     else:
         for h in headers:
-            yield from iter_over_headers_on_depth(h.children, target_depth-1)
+            for sub_h in iter_over_headers_on_depth(h.children, target_depth-1):
+                yield sub_h
 
 
 def iter_over_headers_all_depths(headers, max_depth):

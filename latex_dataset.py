@@ -224,6 +224,12 @@ def map_to_pdf_coords(line_to_show, char_to_show, latex, pdf, wd):
     return parse_synctex_output(synctex_output)
 
 
+def box_area(b):
+    x1, y1, x2, y2 = b
+    w, h = max(x2 - x1, 0), max(y2 - y1, 0)
+    return w * h
+
+
 def box_inter_area(a, b):
     ax1, ay1, ax2, ay2 = a
     bx1, by1, bx2, by2 = b
@@ -231,8 +237,7 @@ def box_inter_area(a, b):
                           max(ay1, by1),
                           min(ax2, bx2),
                           min(ay2, by2))
-    iw, ih = max(ix2 - ix1, 0), max(iy2 - iy1, 0)
-    return iw * ih
+    return box_area((ix1, iy1, ix2, iy2))
 
 
 def intersects_any(target, golds):

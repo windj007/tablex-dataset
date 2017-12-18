@@ -1,6 +1,7 @@
 import subprocess, os, glob, tempfile, sys, TexSoup, pdfquery, \
     re, collections, numpy, cv2, json, itertools, joblib, \
-    shutil, random, traceback, html, ngram, scipy.optimize, scipy.spatial
+    shutil, random, traceback, html, ngram, scipy.optimize, \
+    scipy.spatial, rtree
 from pdfquery.cache import FileCache
 from PIL import Image
 from IPython.display import display
@@ -280,7 +281,7 @@ class PdfMinerWrapper(object):
     def get_page(self, page_no):
         '''Returns: LTPage'''
         rsrcmgr = PDFResourceManager()
-        laparams = LAParams(char_margin=3.5, all_texts = True)
+        laparams = LAParams(char_margin=0.1, all_texts = True)
         device = PDFPageAggregator(rsrcmgr, laparams=laparams)
         interpreter = PDFPageInterpreter(rsrcmgr, device)
         page = list(PDFPage.create_pages(self.doc))[page_no]
@@ -372,7 +373,7 @@ def box_is_good(src, found, max_height_ratio=1.99, max_width_ratio=1.99, min_dic
 
 PQ_IN_BBOX = 'LTPage[pageid="{page}"] LTTextLineHorizontal:overlaps_bbox("{bbox}"), LTPage[pageid="{page}"] LTTextLineVertical:overlaps_bbox("{bbox}")'
 # PQ_IN_BBOX = 'LTPage[pageid="{page}"] LTTextLineHorizontal:in_bbox("{bbox}")'
-PQ_BBOX_PAD = numpy.array([-3, -1, 1, 3])
+PQ_BBOX_PAD = numpy.array([-3, -1, 1, 1])
 def aggregate_object_bboxes_old(pdf, page, boxes, tokens, union=True):
     raise NotImplemented()
     cb = pdf.get_page(page).cropbox
@@ -396,7 +397,7 @@ def aggregate_object_bboxes_old(pdf, page, boxes, tokens, union=True):
     else:
         return good_boxes
 
-    
+
 def aggregate_object_bboxes(pdf, page, boxes, tokens, union=True):
     cropbox = pdf.get_page(page - 1)[1].cropbox
     overlapping_elems = pdf.get_boxes(page - 1,
@@ -423,6 +424,28 @@ def parse_pdf(fname):
     pdf = PdfMinerWrapper(fname)
     pdf.load()
     return pdf
+
+
+def resolve_box_intersections(boxes):
+    rindex = rtree.index.Index(interleaved=True)
+    for box_i, box in enumerate(boxes):
+        rindex.insert(box_i, box)
+    out_boxes = []
+    for cur_i, cur_box in enumerate(boxes):
+        cy1, cx1, cy2, cx2 = cur_box
+        cy = (cy2 + cy1) / 2
+        max_upper_y = None
+        for inter_i in rindex.intersection(cur_box):
+            if inter_i == cur_i:
+                continue
+            inter_box = boxes[inter_i]
+            iy1, ix1, iy2, ix2 = inter_box
+            if iy2 > cy1 and iy2 < cy:
+                if max_upper_y is None or iy2 > max_upper_y:
+                    max_upper_y = iy2 + 1e-3
+        new_cy1 = ((cy1 + max_upper_y) / 2) if not max_upper_y is None else cy1
+        out_boxes.append((new_cy1, cx1, cy2, cx2))
+    return out_boxes
 
 
 def pdf_latex_to_samples(paper_id,
@@ -469,8 +492,9 @@ def pdf_latex_to_samples(paper_id,
                                                              target_pdf_file,
                                                              wd).items():
                             obj_boxes_by_page[page].extend(boxes)
-                assert len(obj_boxes_by_page) <= 1
+                assert len(obj_boxes_by_page) == 1
                 page, boxes = next(iter(obj_boxes_by_page.items()))
+                boxes = resolve_box_intersections(boxes)
                 assigned_boxes = reassign_boxes(pdf, page, boxes, tokens)
                 for part_boxes, part_tokens in zip(assigned_boxes, tokens):
                     for box in boxes_aggregator(pdf, page, part_boxes, part_tokens):
@@ -486,7 +510,9 @@ def pdf_latex_to_samples(paper_id,
                     for box in boxes_aggregator(pdf, page, group_boxes, group_tokens):
                         segments_by_page[page].append((group_category, box))
 
-        
+        shutil.copy2(our_latex_file,
+                     os.path.join(out_dir,
+                                  '{}.tex'.format(paper_id)))
         for page, segments_with_categories in segments_by_page.items():
             markup = [(cat,
                        (numpy.array(box) * POINTS_TO_PIXELS_FACTOR).astype('int'))
@@ -553,9 +579,14 @@ def get_maketitle(soup):
 
 
 GET_ALL_TOKENS_COMMANDS_TO_IGNORE = {'cline'}
-GET_ALL_TOKENS_COMMANDS_WITHOUT_NAME = {'hline', 'shortstack', 'multirow', 'multicolumn'}
+GET_ALL_TOKENS_COMMANDS_WITHOUT_NAME = {'hline', 'makecell', 'multirow', 'multicolumn'}
+GET_ALL_TOKENS_COMMANDS_CONTENTS_TO_SKIP = { 'multirow' : 2, 'multicolumn' : 2 }
 def get_all_tokens(root, include_command_names=True, tokenize=True):
-    if isinstance(root, TexSoup.TokenWithPosition):
+    if isinstance(root, TableCell):
+        for ch in root.contents:
+            for tok in get_all_tokens(ch, include_command_names=include_command_names, tokenize=tokenize):
+                yield tok
+    elif isinstance(root, TexSoup.TokenWithPosition):
         if tokenize:
             for tok in root.split(' '):
                 if tok:
@@ -569,7 +600,12 @@ def get_all_tokens(root, include_command_names=True, tokenize=True):
             if isinstance(root.name, TexSoup.TokenWithPosition) and not root.name.text in GET_ALL_TOKENS_COMMANDS_WITHOUT_NAME:
                 yield root.name
 
-        for ch in root.contents:
+        if isinstance(root.name, TexSoup.TokenWithPosition) and root.name.text in GET_ALL_TOKENS_COMMANDS_CONTENTS_TO_SKIP:
+            contents_to_skip = GET_ALL_TOKENS_COMMANDS_CONTENTS_TO_SKIP[root.name.text]
+        else:
+            contents_to_skip = 0
+
+        for ch in list(root.contents)[contents_to_skip:]:
             for tok in get_all_tokens(ch, include_command_names=include_command_names, tokenize=tokenize):
                 yield tok
 
@@ -656,7 +692,7 @@ def structurize_tabular_contents(root):
     result = []
     last_line = []
     for ch in root.contents:
-        if isinstance(ch, TexSoup.TexNode) and ch.name.lower() in ('multicolumn', 'multirow', 'shortstack'):
+        if isinstance(ch, TexSoup.TexNode) and ch.name.lower() in ('multicolumn', 'multirow', 'makecell'):
             last_line.append(ch)
         elif isinstance(ch, (TexSoup.TokenWithPosition, TexSoup.TexNode)):
             for tok in get_all_tokens(ch, include_command_names=False):
@@ -685,7 +721,7 @@ def structurize_tabular_contents(root):
     return Table([split_row_into_cells(row) for row in result])
 
 
-def get_table_info(soup):
+def get_table_info(soup, extract_cells=True):
     for table in list(soup.find_all('table')):
         tabular = table.tabular or table.array
         found_some_content = False
@@ -715,30 +751,61 @@ def get_table_info(soup):
                        True,
                        [soup.char_pos_to_line(tok.position)
                         for tok in get_all_tokens(caption)],
-                       [tok.text for tok in get_all_tokens(caption, False)])
-            try:
-                parsed_table = structurize_tabular_contents(tabular)
+                       [tok.text for tok in get_all_tokens(caption, False)],
+                       [])
 
-                cell_positions = []
-                cell_tokens = []
-                row_groups = [(3, []) for _ in parsed_table.rows]
-                col_groups = [(4, []) for _ in parsed_table.rows[0]]
-                cur_cell_i = 0
-                for row_i, row in enumerate(parsed_table.rows):
-                    for col_i, cell in enumerate(row):
-                        cell_positions.append([soup.char_pos_to_line(tok.position) for tok in get_all_tokens(cell)])
-                        cell_tokens.append(list(get_all_tokens(cell, False)))
-                        row_groups[row_i][1].append(cur_cell_i)
-                        col_groups[col_i][1].append(cur_cell_i)
-                        cur_cell_i += 1
-                    
-                yield (2,
-                       False,
-                       cell_positions,
-                       cell_tokens,
-                       row_groups + col_groups)
-            except:
-                print(traceback.format_exc())
+            if extract_cells:
+                try:
+                    parsed_table = structurize_tabular_contents(tabular)
+
+                    cell_positions = []
+                    cell_tokens = []
+                    row_groups = [(3, []) for _ in parsed_table.rows]
+                    col_groups = [(4, []) for _ in parsed_table.rows[-1]]
+                    cur_cell_i = 0
+                    for row_i in range(len(parsed_table.rows)-1, -1, -1):
+                        row = parsed_table.rows[row_i]
+                        row_col_ids = [0]
+                        for cell in row[:-1]:
+                            row_col_ids.append(row_col_ids[-1] + cell.colspan)
+                        for cell, col_i in zip(row[::-1], row_col_ids[::-1]):
+                            cell_positions.append([soup.char_pos_to_line(tok.position) for tok in get_all_tokens(cell)])
+                            cell_tokens.append(list(get_all_tokens(cell, False)))
+
+                            if cell.colspan > 1:
+                                cur_cols = { col_i + off for off in range(cell.colspan) }
+                                new_col_group = list(set(cell
+                                                         for col in cur_cols
+                                                         for cell in col_groups[col][1]))
+                                new_col_group.append(cur_cell_i)
+                                cur_cols.add(len(col_groups))
+                                col_groups.append((4, new_col_group))
+                            else:
+                                col_groups[col_i][1].append(cur_cell_i)
+                            col_i -= cell.colspan
+
+                            if cell.rowspan > 1:
+                                cur_rows = { row_i + off for off in range(cell.rowspan) }
+                                new_row_group = list(set(cell
+                                                         for row in cur_rows
+                                                         for cell in row_groups[row][1]))
+                                new_row_group.append(cur_cell_i)
+                                cur_rows.add(len(row_groups))
+                                row_groups.append((3, new_row_group))
+                            else:
+                                row_groups[row_i][1].append(cur_cell_i)
+
+                            cur_cell_i += 1
+
+                    yield (2,
+                           False,
+                           cell_positions,
+                           cell_tokens,
+                           row_groups + col_groups
+    #                        col_groups
+                          )
+                except:
+                    print(traceback.format_exc())
 
 
 def get_cell_text(c):
@@ -813,10 +880,20 @@ def multiline_ngram_dist(cell_txt, box_txt, empty_res=100):
         return ngram_dist(cell_txt, box_txt, empty_res=empty_res)
 
 
+def strict_cell_dist(cell_txt, box_txt, empty_res=100):
+    if not (cell_txt and box_txt):
+        return empty_res
+    cell_lines = cell_txt.split(FORCE_LINE_BREAK)
+    res = 0 if any(box_txt == l for l in cell_lines) else 1
+#     print(res, '!!!!!!', cell_txt, box_txt)
+    return res
+
+
 def reassign_boxes(pdf, page_i, found_boxes, cells,
-                   max_assign_dist=0.90, pos_factor=0.7,
+                   max_assign_dist=0.90, pos_factor=0.0,
                    max_em_iters=10, pos_diff_eps=1e-3,
-                   max_assign_iter=4):
+                   max_assign_iter=4,
+                   text_dist=strict_cell_dist):
     found_boxes = list(set(map(tuple, found_boxes)))
     found_boxes.sort(key=lambda b: (b[0], b[1]))
 
@@ -834,12 +911,12 @@ def reassign_boxes(pdf, page_i, found_boxes, cells,
 #     print('cell_texts', cell_texts)
     cell_allows_multiple_boxes = [r'\\' in t for t in cell_texts]
 
-    text_dist = numpy.array([[multiline_ngram_dist(ct, bt) for bt in box_texts]
+    text_dist = numpy.array([[text_dist(ct, bt) for bt in box_texts]
                              for ct in cell_texts])
 
     cur_cell_centers = numpy.broadcast_to(mean_box_center.mean(0), (len(cell_texts), 2))
     for iter_i in range(max_em_iters):
-        cur_centers_dist = scipy.spatial.distance.cdist(cur_cell_centers, box_centers)
+        cur_centers_dist = numpy.nan_to_num(scipy.spatial.distance.cdist(cur_cell_centers, box_centers) ** 2)
         cur_dist = (1 - pos_factor) * text_dist + pos_factor * cur_centers_dist
         cur_mapping = assign_multiple(cur_dist,
                                       cell_allows_multiple_boxes,

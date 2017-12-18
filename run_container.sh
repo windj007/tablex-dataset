@@ -20,6 +20,7 @@ $CMD run -ti --rm \
     -e "SSL=1" \
     -v `pwd`/certs:/jupyter/certs \
     -v `pwd`:/notebook \
+    -v /mnt/data/rsuvorov/sources:/notebook/data/arxiv/sources \
     $BIND_PORT \
     -m 18G \
     --name tablex \
@@ -27,3 +28,4 @@ $CMD run -ti --rm \
     --shm-size=8192m \
     tablex-dataset \
     $@
+

@@ -1,7 +1,7 @@
 from latex_dataset import *
 
 CONTENT_TYPES = ['number', 'number_sized', 'label', 'long_text']
-CONTENT_TYPES_P = [0.3, 0.3, 0.3, 0.1]
+CONTENT_TYPES_P = [0.25, 0.25, 0.25, 0.25]
 def gen_content_type():
     return numpy.random.choice(CONTENT_TYPES, p=CONTENT_TYPES_P)
 
@@ -11,14 +11,29 @@ HEADER_CHILDREN_N_P = [0.8, 0.2]
 def gen_header_children_n():
     return numpy.random.choice(HEADER_CHILDREN_N, p=HEADER_CHILDREN_N_P)
 
-WORD_LEN_MEAN = 6
-WORD_LEN_STD = 4
+
+
+_USED_WORDS = set()
+def reset_word_gen():
+    _USED_WORDS = set()
+
+
+WORD_LEN_MEAN = 4
+WORD_LEN_STD = 3
 ALLOWED_CHARS = list(''.join(map(chr,
                                  itertools.chain(range(ord('A'), ord('Z')),
                                                  range(ord('a'), ord('z'))))) + '-.,*')
-def gen_word(mean=WORD_LEN_MEAN, std=WORD_LEN_STD):
-    word_len = max(1, int(numpy.round(numpy.random.normal(WORD_LEN_MEAN, WORD_LEN_STD))))
+def gen_word_impl(mean=WORD_LEN_MEAN, std=WORD_LEN_STD):
+    word_len = max(2, int(numpy.round(numpy.random.normal(WORD_LEN_MEAN, WORD_LEN_STD))))
     return ''.join(numpy.random.choice(ALLOWED_CHARS, word_len))
+
+BAD_WORD_RE = re.compile('fi|ff', re.I)
+def gen_word(*args, **kwargs):
+    while True:
+        cand = gen_word_impl(*args, **kwargs)
+        if not cand in _USED_WORDS and not BAD_WORD_RE.search(cand):
+            _USED_WORDS.add(cand)
+            return cand
 
 
 LONG_TEXT_MAX_LINE = 3
@@ -28,25 +43,25 @@ def gen_long_text(words_n=None, max_len=3, line_len = LONG_TEXT_MAX_LINE, wrap_m
         words_n = numpy.random.randint(2, max_len)
     words = [el
              for i in range(words_n)
-             for el in [gen_word(),] #+ ([FORCE_LINE_BREAK] if (i + 1) % line_len == 0 else [])
+             for el in [gen_word(),] + ([FORCE_LINE_BREAK] if (i + 1) % line_len == 0 else [])
             ]
     if words[-1] == FORCE_LINE_BREAK:
         words = words[:-1]
     content = ' '.join(words)
     if FORCE_LINE_BREAK in content and wrap_makecell:
-        return r'\shortstack{{ {} }}'.format(content)
+        return r' \makecell{{ {} }} '.format(content)
     else:
         return content
 
 
-TITLE_WORDS_N = [1, 2] #, 3, 4, 5, 6]
-TITLE_WORDS_N_P = [0.5, 0.5] # [0.25, 0.25, 0.2, 0.15, 0.1, 0.05]
+TITLE_WORDS_N = [1, 2, 3, 4, 5, 6]
+TITLE_WORDS_N_P = [0.25, 0.25, 0.2, 0.15, 0.1, 0.05]
 assert sum(TITLE_WORDS_N_P) == 1
 TITLE_LINE_MIN = 2
-TITLE_LINE_MAX = 4
+TITLE_LINE_MAX = max(TITLE_WORDS_N)
 def gen_title(wrap_makecell=True):
     words_n = max(1, numpy.random.choice(TITLE_WORDS_N, p=TITLE_WORDS_N_P))
-    line_size = words_n + 1 # numpy.random.randint(TITLE_LINE_MIN, TITLE_LINE_MAX+1)
+    line_size = numpy.random.randint(TITLE_LINE_MIN, max(TITLE_LINE_MIN, words_n) + 1)
     return gen_long_text(words_n=words_n, line_len=line_size, wrap_makecell=wrap_makecell)
 
 
@@ -57,18 +72,27 @@ def gen_align():
 
 
 BORDERS = ['|', ' ']
-BORDERS_P = [0.5, 0.5]
+BORDERS_P = [0.4, 0.6]
 def gen_borders():
     return numpy.random.choice(BORDERS, p=BORDERS_P)
 
 
-HEADER_TYPES = ['atomic', 'composite']
-HEADER_TYPES_P = [1.0, 0.0]
+H_HEADER_TYPES = ['atomic', 'composite']
+H_HEADER_TYPES_P = [0.8, 0.2]
+V_HEADER_TYPES = ['atomic', 'composite']
+V_HEADER_TYPES_P = [0.5, 0.5]
+MAX_HEADER_DEPTH = 2
 Header = collections.namedtuple('Header',
                                 'type title content_type children format'.split(' '))
-def gen_header():
-    header_type = numpy.random.choice(HEADER_TYPES, p=HEADER_TYPES_P)
-    title = gen_title(wrap_makecell=(header_type == 'atomic'))
+def gen_header(kind, depth=0):
+    if depth < MAX_HEADER_DEPTH:
+        if kind == 'h':
+            header_type = numpy.random.choice(H_HEADER_TYPES, p=H_HEADER_TYPES_P)
+        else:
+            header_type = numpy.random.choice(V_HEADER_TYPES, p=V_HEADER_TYPES_P)
+    else:
+        header_type = 'atomic'
+    title = gen_title()
     formatting = dict(align=gen_align(),
                       borders=gen_borders())
     if header_type == 'atomic':
@@ -77,14 +101,15 @@ def gen_header():
             formatting['align'] = 'c'
         return Header(header_type, title, ct, [], formatting)
     elif header_type == 'composite':
+        formatting['align'] = 'c'
         children_n = gen_header_children_n()
-        children = [gen_header() for _ in range(children_n)]
+        children = [gen_header(kind, depth=depth+1) for _ in range(children_n)]
         return Header(header_type, title, '', children, formatting)
     raise NotImplemented()
 
 
-def gen_headers(n):
-    return [gen_header() for _ in range(n)]
+def gen_headers(n, kind):
+    return [gen_header(kind) for _ in range(n)]
 
 
 def get_headers_depth(headers):
@@ -172,18 +197,19 @@ def gen_cell(cell_header, row_header):
 
 
 def gen_hspacing():
-    factor = numpy.random.randint(0, 10)
-    return r'\setlength{{\tabcolsep}}{{{}pt}}'.format(factor)
+    factor = numpy.random.beta(1.7, 10) * 15
+    return r'\setlength{{\tabcolsep}}{{{:.2f}pt}}'.format(factor)
 
 
 def gen_vspacing():
-    factor = numpy.random.rand() + 1
+    factor = numpy.random.beta(1.5, 2) + 1
     return r'\renewcommand{{\arraystretch}}{{{:.2f}}}'.format(factor)
 
 
 def gen_table_contents():
-    col_headers = gen_headers(numpy.random.randint(2, 4))
-    row_headers = gen_headers(numpy.random.randint(2, 10))
+    reset_word_gen()
+    col_headers = gen_headers(numpy.random.randint(2, 4), 'v')
+    row_headers = gen_headers(numpy.random.randint(2, 10), 'h')
     cells = [[gen_cell(ch, rh) for ch in iter_over_atomic_headers(col_headers)]
              for rh in iter_over_atomic_headers(row_headers)]
     table_format = dict(attributes=[#r'\centering',
@@ -273,7 +299,24 @@ def table_contents_to_latex(col_headers, row_headers, cells_contents, table_form
                                       tabular_contents=table_body)
 
 
-def render_table(table_def, template_dir, out_file, display_demo=False):
+def check_generated_table(out_file):
+    with open(out_file + '.tex', 'r') as f:
+        tex = TexSoup.TexSoup(f.read())
+    table = structurize_tabular_contents(tex.table.tabular)
+    with open(out_file + '_0001_out.json', 'r') as f:
+        boxes = json.load(f)
+    found_cells_num = sum(1 for ch, _ in boxes if ch == 2)
+    real_cells_num = sum(1
+                         for row in table.rows
+                         for cell in row
+                         if ''.join(t.text for t in get_all_tokens(cell)))
+    if real_cells_num != found_cells_num:
+#         print('found', found_cells_num, 'real', real_cells_num)
+        return False
+    return True
+
+
+def render_table(table_def, template_dir, out_file, print_latex_content=False, display_demo=False, on_wrong_parse='ignore'):
     with tempfile.TemporaryDirectory() as wd:
         for fname in os.listdir(template_dir):
             shutil.copy2(os.path.join(template_dir, fname), wd)
@@ -285,7 +328,8 @@ def render_table(table_def, template_dir, out_file, display_demo=False):
         latex_contents = latex_template.format(contents=table_contents)
         with open(our_latex_file, 'w') as f:
             f.write(latex_contents)
-#         print(table_contents)
+        if print_latex_content:
+            print(latex_contents)
         compile_latex(wd)
         target_pdf_file = os.path.splitext(our_latex_file)[0] + '.pdf'
         target_pdf_filename = os.path.basename(target_pdf_file)
@@ -298,3 +342,12 @@ def render_table(table_def, template_dir, out_file, display_demo=False):
                              get_table_info,
                              boxes_aggregator=aggregate_object_bboxes,
                              display_demo=display_demo)
+
+        correct = check_generated_table(out_file)
+        assert on_wrong_parse in ('delete', 'raise', 'ignore')
+        if not correct:
+            if on_wrong_parse == 'delete':
+                for fname in glob.glob(out_file + '*'):
+                    os.remove(fname)
+            elif on_wrong_parse == 'raise':
+                raise Exception('Wrong sample in {}'.format(out_file))

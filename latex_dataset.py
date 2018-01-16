@@ -46,11 +46,11 @@ def pdf_to_pages(in_file, out_dir, pages=None):
 
 
 CLS_TO_COLOR = [
-    [255, 0, 0],
-    [0, 255, 0],
-    [0, 0, 255],
-    [255, 255, 0],
-    [255, 0, 255],
+    [255, 0, 0], # caption
+    [0, 255, 0], # body
+    [0, 0, 255], # cells
+    [255, 255, 0], # rows
+    [255, 0, 255], # cols
     [255, 128, 0],
     [255, 0, 128],
     [128, 255, 0],
@@ -238,7 +238,9 @@ def box_inter_area(a, b):
                           max(ay1, by1),
                           min(ax2, bx2),
                           min(ay2, by2))
-    return box_area((ix1, iy1, ix2, iy2))
+    res = box_area((ix1, iy1, ix2, iy2))
+#     print('box_inter_area', a, b, (ix1, iy1, ix2, iy2), res)
+    return res
 
 
 def intersects_any(target, golds):
@@ -253,6 +255,22 @@ def included(what, to):
 
 def included_into_any(what, golds):
     return any(included(what, g) for g in golds)
+
+
+def get_box_center(box):
+    y1, x1, y2, x2 = box
+    return numpy.array([(y1 + y2) / 2, (x1 + x2) / 2])
+
+
+def is_point_in_box(point, box):
+    y, x = point
+    y1, x1, y2, x2 = box
+    return y >= y1 and x >= x1 and y <= y2 and x <= x2
+
+
+def center_in_any(what, golds):
+    center = get_box_center(what)
+    return any(is_point_in_box(center, g) for g in golds)
 
 
 # Taken from http://zderadicka.eu/parsing-pdf-for-fun-and-profit-indeed-in-python/
@@ -300,10 +318,14 @@ class PdfMinerWrapper(object):
         if isinstance(root, LTAnno) or not intersects_any(root.bbox, gold_boxes):
             return
         if isinstance(root, (LTChar,)) \
-            and included_into_any(root.bbox, gold_boxes):
+            and center_in_any(root.bbox, gold_boxes):
             yield root
             return
         if not isinstance(root, LTChar):
+            try:
+                iter(root)
+            except TypeError:
+                return
             for ch in root:
                 for b in self.__get_boxes(ch, gold_boxes):
                     yield b
@@ -843,11 +865,6 @@ def assign_multiple(costs, allows_multiple, max_iter=2, max_cost=numpy.inf):
         unassigned_rows = numpy.setdiff1d(unassigned_rows, list(single_assignment_constraint))
         unassigned_cols = numpy.setdiff1d(unassigned_cols, list(assigned_cols))
     return result
-
-
-def get_box_center(box):
-    y1, x1, y2, x2 = box
-    return numpy.array([(y1 + y2) / 2, (x1 + x2) / 2])
 
 
 NGRAM_SIM_WEIGHTS = (

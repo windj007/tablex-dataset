@@ -30,4 +30,4 @@ RUN pip install svgwrite Pillow opencv-python tabula-py pdfquery \
     git+https://github.com/windj007/imgaug
 RUN pip uninstall -y imgaug && pip install -U imgaug
 RUN apt-get install -y libspatialindex-dev && pip install -U rtree
-RUN pip install -U toposort
+RUN pip install -U toposort pydensecrf

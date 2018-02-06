@@ -1,7 +1,7 @@
 from latex_dataset import *
 
 CONTENT_TYPES = ['number', 'number_sized', 'label', 'long_text']
-CONTENT_TYPES_P = [0.25, 0.25, 0.25, 0.25]
+CONTENT_TYPES_P = [0.4, 0.3, 0.3, 0.0]
 def gen_content_type():
     return numpy.random.choice(CONTENT_TYPES, p=CONTENT_TYPES_P)
 
@@ -38,9 +38,9 @@ def gen_word(*args, **kwargs):
 
 LONG_TEXT_MAX_LINE = 3
 FORCE_LINE_BREAK = r'\\'
-def gen_long_text(words_n=None, max_len=3, line_len = LONG_TEXT_MAX_LINE, wrap_makecell=True):
+def gen_long_text(words_n=None, min_len=8, max_len=20, line_len=LONG_TEXT_MAX_LINE, wrap_makecell=True):
     if words_n is None:
-        words_n = numpy.random.randint(2, max_len)
+        words_n = numpy.random.randint(min_len, max_len)
     words = [el
              for i in range(words_n)
              for el in [gen_word(),] + ([FORCE_LINE_BREAK] if (i + 1) % line_len == 0 else [])
@@ -54,11 +54,13 @@ def gen_long_text(words_n=None, max_len=3, line_len = LONG_TEXT_MAX_LINE, wrap_m
         return content
 
 
-TITLE_WORDS_N = [1, 2, 3, 4, 5, 6]
-TITLE_WORDS_N_P = [0.25, 0.25, 0.2, 0.15, 0.1, 0.05]
+# TITLE_WORDS_N = [1, 2, 3, 4, 5, 6]
+# TITLE_WORDS_N_P = [0.25, 0.25, 0.2, 0.15, 0.1, 0.05]
+TITLE_WORDS_N = [1, 2]
+TITLE_WORDS_N_P = [0.5, 0.5]
 assert sum(TITLE_WORDS_N_P) == 1
-TITLE_LINE_MIN = 2
-TITLE_LINE_MAX = max(TITLE_WORDS_N)
+TITLE_LINE_MIN = max(TITLE_WORDS_N) + 1 # 2
+TITLE_LINE_MAX = max(TITLE_WORDS_N) + 1
 def gen_title(wrap_makecell=True):
     words_n = max(1, numpy.random.choice(TITLE_WORDS_N, p=TITLE_WORDS_N_P))
     line_size = numpy.random.randint(TITLE_LINE_MIN, max(TITLE_LINE_MIN, words_n) + 1)
@@ -74,14 +76,15 @@ def gen_align():
 BORDERS = ['|', ' ']
 BORDERS_P = [0.4, 0.6]
 def gen_borders():
+    return '|'
     return numpy.random.choice(BORDERS, p=BORDERS_P)
 
 
 H_HEADER_TYPES = ['atomic', 'composite']
-H_HEADER_TYPES_P = [0.8, 0.2]
+H_HEADER_TYPES_P = [0.9999, 0.0001]
 V_HEADER_TYPES = ['atomic', 'composite']
-V_HEADER_TYPES_P = [0.5, 0.5]
-MAX_HEADER_DEPTH = 2
+V_HEADER_TYPES_P = [0.8, 0.2]
+MAX_HEADER_DEPTH = 1
 Header = collections.namedtuple('Header',
                                 'type title content_type children format'.split(' '))
 def gen_header(kind, depth=0):
@@ -208,8 +211,8 @@ def gen_vspacing():
 
 def gen_table_contents():
     reset_word_gen()
-    col_headers = gen_headers(numpy.random.randint(2, 4), 'v')
-    row_headers = gen_headers(numpy.random.randint(2, 10), 'h')
+    col_headers = gen_headers(numpy.random.randint(4, 10), 'v')
+    row_headers = gen_headers(numpy.random.randint(4, 15), 'h')
     cells = [[gen_cell(ch, rh) for ch in iter_over_atomic_headers(col_headers)]
              for rh in iter_over_atomic_headers(row_headers)]
     table_format = dict(attributes=[#r'\centering',
@@ -256,7 +259,7 @@ def add_hline_if_needed(row_headers, row_length):
         return r'\hline'
     else:
         return '\\cline{{{start}-{end}}}\n'.format(start=first_border_i+1,
-                                                   end=row_length)
+                                                   end=row_length+1)
 
 
 BASE_TABLE_TEMPLATE = r'''

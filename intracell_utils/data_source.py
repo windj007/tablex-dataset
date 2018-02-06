@@ -80,14 +80,40 @@ def group_by_intersection(criterion_boxes, boxes_to_group, threshold=0.97):
     return result
 
 
+def group_by_centers(criterion_boxes, boxes_to_group):
+    result = collections.defaultdict(set)
+    for box_i, box in enumerate(boxes_to_group):
+        center = get_box_center(box)
+        for group_i, big_box in enumerate(criterion_boxes):
+            if is_point_in_box(center, big_box):
+                result[box_i].add(group_i)
+    return result
+
+
 def get_biggest_box(boxes):
     return boxes[numpy.argmax(list(map(box_area, boxes)))]
 
 
-def make_grid(boxes):
+def shrink_box(box, xfactor=0.15, yfactor=0.15, min_w=5, min_h=5, max_dx=2, max_dy=3):
+    y1, x1, y2, x2 = box
+    w = x2 - x1
+    max_dx = max(0, min((w - min_w) / 2.0, max_dx))
+    dx = min(w * xfactor, max_dx)
+
+    h = y2 - y1
+    max_dy = max(0, min((h - min_h) / 2.0, max_dy))
+    dy = min(h * yfactor, max_dy)
+
+    return (y1+dy, x1+dx, y2-dy, x2-dx)
+
+
+def make_grid(boxes, shrink_factor=0.05):
     if len(boxes) == 0:
         return []
 
+    boxes = [shrink_box(box, xfactor=shrink_factor, yfactor=shrink_factor)
+             for box in boxes]
+    
     rindex = rtree.index.Index(interleaved=True)
     for box_i, box in enumerate(boxes):
         rindex.insert(box_i, box)
@@ -99,30 +125,69 @@ def make_grid(boxes):
     for box_i, box in enumerate(boxes):
         box_y1, box_x1, box_y2, box_x2 = box
 
+        cur_inter = set(rindex.intersection(box))
+        
         immediate_left_neigh_border = max((boxes[i][1] for i in
-                                           rindex.intersection((box_y1, min_x-1e-3, box_y2, box_x1-1e-3))),
+                                           rindex.intersection((box_y1, min_x-1e-3, box_y2, box_x1-1e-3))
+                                           if not i in cur_inter),
                                           default=min_x)
         immediate_right_neigh_border = min((boxes[i][3] for i in
-                                            rindex.intersection((box_y1, box_x2+1e-3, box_y2, max_x+1e-3))),
+                                            rindex.intersection((box_y1, box_x2+1e-3, box_y2, max_x+1e-3))
+                                            if not i in cur_inter),
                                            default=max_x)
         immediate_upper_neigh_border = max((boxes[i][0] for i in
-                                            rindex.intersection((min_y-1e-3, box_x1, box_y1-1e-3, box_x2))),
+                                            rindex.intersection((min_y-1e-3, box_x1, box_y1-1e-3, box_x2))
+                                           if not i in cur_inter),
                                            default=min_y)
         immediate_lower_neigh_border = min((boxes[i][2] for i in
-                                            rindex.intersection((box_y2+1e-3, box_x1, max_y+1e-3, box_x2))),
+                                            rindex.intersection((box_y2+1e-3, box_x1, max_y+1e-3, box_x2))
+                                           if not i in cur_inter),
                                            default=max_y)
 
+        
+        
         cur_box_neighborhood = {}
 
-        cur_box_neighborhood['lower'] = list(rindex.intersection((box_y2+1e-3,
-                                                                  immediate_left_neigh_border,
-                                                                  immediate_lower_neigh_border+1e-3,
-                                                                  immediate_right_neigh_border)))
+        cur_box_neighborhood['upper'] = set(rindex.intersection((immediate_upper_neigh_border-1e-3,
+                                                                 box_x1,
+                                                                 box_y1-1e-3,
+                                                                 box_x2))) - cur_inter
+        cur_box_neighborhood['left'] = set(rindex.intersection((box_y1,
+                                                                immediate_left_neigh_border-1e-3,
+                                                                box_y2,
+                                                                box_x1-1e-3))) - cur_inter
+        cur_box_neighborhood['lower'] = set(rindex.intersection((box_y2+1e-3,
+                                                                 box_x1,
+                                                                 immediate_lower_neigh_border+1e-3,
+                                                                 box_x2))) - cur_inter
+        cur_box_neighborhood['right'] = set(rindex.intersection((box_y1,
+                                                                 box_x2+1e-3,
+                                                                 box_y2,
+                                                                 immediate_right_neigh_border+1e-3))) - cur_inter
 
-        cur_box_neighborhood['right'] = list(rindex.intersection((immediate_upper_neigh_border,
-                                                                  box_x2+1e-3,
-                                                                  immediate_lower_neigh_border,
-                                                                  immediate_right_neigh_border+1e-3)))
+        cur_box_neighborhood['upper_left'] = set(rindex.intersection((immediate_upper_neigh_border-1e-3,
+                                                                      immediate_left_neigh_border-1e-3,
+                                                                      box_y1-1e-3,
+                                                                      box_x1-1e-3)))
+        cur_box_neighborhood['upper_left'] -= (cur_box_neighborhood['upper'] | cur_box_neighborhood['left'] | cur_inter)
+
+        cur_box_neighborhood['lower_left'] = set(rindex.intersection((box_y2+1e-3,
+                                                                      immediate_left_neigh_border-1e-3,
+                                                                      immediate_lower_neigh_border+1e-3,
+                                                                      box_x1-1e-3)))
+        cur_box_neighborhood['lower_left'] -= (cur_box_neighborhood['lower'] | cur_box_neighborhood['left'] | cur_inter)
+        
+        cur_box_neighborhood['lower_right'] = set(rindex.intersection((box_y2+1e-3,
+                                                                       box_x2+1e-3,
+                                                                       immediate_lower_neigh_border+1e-3,
+                                                                       immediate_right_neigh_border+1e-3)))
+        cur_box_neighborhood['lower_right'] -= (cur_box_neighborhood['lower'] | cur_box_neighborhood['right'] | cur_inter)
+
+        cur_box_neighborhood['upper_right'] = set(rindex.intersection((immediate_upper_neigh_border-1e-3,
+                                                                       box_x2+1e-3,
+                                                                       box_y1-1e-3,
+                                                                       immediate_right_neigh_border+1e-3)))
+        cur_box_neighborhood['upper_right'] -= (cur_box_neighborhood['upper'] | cur_box_neighborhood['right'] | cur_inter)
 
         neighborhood.append(cur_box_neighborhood)
     return neighborhood
@@ -211,10 +276,10 @@ MAX_THICKNESS = 40
 def calc_intercell_line_mask_params(cell1, cell2, direction):
     center1 = bbox_center_cv2(cell1)
     center2 = bbox_center_cv2(cell2)
-    if direction in ('same_row', 'right'):
+    if direction in ('same_row', 'right', 'left', 'upper_left', 'upper_right', 'lower_left', 'lower_right'):
         thickness = min(cell1[2] - cell1[0],
                         cell2[2] - cell2[0])
-    elif direction in ('same_col', 'lower'):
+    elif direction in ('same_col', 'lower', 'upper'):
         thickness = min(cell1[3] - cell1[1],
                         cell2[3] - cell2[1])
     else:
@@ -262,6 +327,34 @@ def make_mask_for_nn_det(size, box_cats, boxes_on_image):
     return make_mask_for_nn_base(size, TOTAL_DET_CLASSES, [captions, bodies])
 
 
+class CellsRel:
+    OTHER = 0
+    SAME = 1
+    NEIGH = 2
+
+
+def get_cells_relation_def(neigh_type, cur_rows, cur_cols, neigh_rows, neigh_cols):
+    rows_rel = cols_rel = CellsRel.OTHER
+    if neigh_type in {'left', 'right'}:
+        rows_rel = CellsRel.SAME
+        cols_rel = CellsRel.NEIGH
+    elif neigh_type in {'upper', 'lower'}:
+        rows_rel = CellsRel.NEIGH
+        cols_rel = CellsRel.SAME
+    else:
+        row_diff = min((abs(a - b) for a in cur_rows for b in neigh_rows if a != b),
+                       default=100)
+        col_diff = min((abs(a - b) for a in cur_cols for b in neigh_cols if a != b),
+                       default=100)
+        if cur_rows and cur_rows < neigh_rows: # cur is a potential row superheader for neigh
+            rows_rel = CellsRel.SAME
+            cols_rel = CellsRel.NEIGH if col_diff == 1 else CellsRel.OTHER
+        if cur_cols and cur_cols < neigh_cols: # cur is a potential col superheader for neigh
+            rows_rel = CellsRel.NEIGH if row_diff == 1 else CellsRel.OTHER
+            cols_rel = CellsRel.SAME
+    return rows_rel, cols_rel
+
+
 INT_MASK_CHANNELS = ['body', 'cell', 'same_row_other_col', 'same_col_other_row']
 TOTAL_INT_CLASSES = len(INT_MASK_CHANNELS)
 INTERCELL_LINE_WIDTH = 10
@@ -278,40 +371,46 @@ def make_mask_for_nn_intracell(size, box_cats, boxes_on_image):
     body = get_biggest_box(boxes_by_cat[1])
     cells = boxes_by_cat[2]
     rows = boxes_by_cat[3]
+    rows.sort(key=lambda b: (b[0], b[1]))
     cols = boxes_by_cat[4]
+    cols.sort(key=lambda b: (b[1], b[0]))
 
-    cell2rows = group_by_intersection(rows, cells)
-    cell2cols = group_by_intersection(cols, cells)
+    cell2rows = group_by_centers(rows, cells)
+    cell2cols = group_by_centers(cols, cells)
 
-    boxes_by_channel = [[body], cells]
+    boxes_by_channel = [[body],
+                        [shrink_box(c) for c in cells]]
     result = make_mask_for_nn_base(size, TOTAL_INT_CLASSES, boxes_by_channel)
 
     grid = make_grid(cells)
     for i, cur_box in enumerate(cells):
         cur_rows = cell2rows[i]
         cur_cols = cell2cols[i]
-        for direction, neigh_boxes_idx in grid[i].items():
-            for neigh_box_i in neigh_boxes_idx:
+        for neigh_type, neighbors_idx in grid[i].items():
+            for neigh_box_i in neighbors_idx:
+                rows_rel, cols_rel = get_cells_relation_def(neigh_type,
+                                                            cur_rows,
+                                                            cur_cols,
+                                                            cell2rows[neigh_box_i],
+                                                            cell2cols[neigh_box_i])
+
                 neigh_box = cells[neigh_box_i]
-                # here we assume that we are going to the right and bottom
-                same_rows = cur_rows <= cell2rows[neigh_box_i]
-                same_cols = cur_cols <= cell2cols[neigh_box_i]
-                if same_rows and same_cols:
-#                     print('same_rows and same_cols')
-#                     print(i, neigh_box_i)
-#                     print(cur_box, cells[neigh_box_i])
-#                     print(cur_rows, cur_cols)
-#                     print(cell2rows[neigh_box_i], cell2cols[neigh_box_i])
-#                     continue
-                    raise Exception('Different cells but same row and col?!?!?!?!?!')
-                if not (same_rows or same_cols):
-                    continue
-                channel = 2 if same_rows else 3
-                draw_intercell_mask(result[channel],
-                                    cur_box,
-                                    neigh_box,
-                                    'same_row' if same_rows else 'same_col',
-                                    1)
+                if rows_rel == CellsRel.SAME and cols_rel == CellsRel.SAME:
+                    pass
+#                     raise Exception('Different cells but same row and col?!?!?!?!?!')
+                elif rows_rel == CellsRel.SAME and cols_rel == CellsRel.NEIGH:
+                    draw_intercell_mask(result[2],
+                                        cur_box,
+                                        neigh_box,
+                                        'same_row',
+                                        1)
+                elif cols_rel == CellsRel.SAME and rows_rel == CellsRel.NEIGH:
+#                     print('diag', i, neigh_box_i, neigh_type, cur_rows, neigh_rows, cur_cols, neigh_cols)
+                    draw_intercell_mask(result[3],
+                                        cur_box,
+                                        neigh_box,
+                                        'same_col',
+                                        1)
 
     return result
 
@@ -416,6 +515,7 @@ def prepare_det_batch(batch_image_ids, augmenter, out_shape=(800, 1024)):
             boxes_aug_lists_with_cats)
 
 
+INT_CHANNEL_LOSS_WEIGHTS = numpy.array([1.0, 1.5, 1.0, 1.0], dtype='float32').reshape((1, 4, 1, 1))
 def prepare_int_batch(batch_image_ids, augmenter, out_shape=(800, 400)):
     images, box_cats, boxes = zip(*[prepare_img_boxes_for_nn_crop(*load_image_with_boxes(img_id),
                                                                   shape=out_shape)
@@ -442,10 +542,13 @@ def prepare_int_batch(batch_image_ids, augmenter, out_shape=(800, 400)):
             img_boxes_with_cats[c-1].append((b.y1, b.x1, b.y2, b.x2)) # we throw away 0 category
         boxes_aug_lists_with_cats.append(img_boxes_with_cats)
 
+    mask[:, 0] = 0
+    mask[:, 2] = 0
+    mask[:, 3] = 0
     return (batch_image_ids,
             numpy.expand_dims(numpy.array(images_aug), 1),
             mask,
-            calc_loss_weights(mask, channels=[1]),
+            calc_loss_weights(mask, channels=[1]) * INT_CHANNEL_LOSS_WEIGHTS,
             boxes_aug_lists_with_cats)
 
 
@@ -506,9 +609,13 @@ imgaug_pipeline = iaa.Sequential([
 #     iaa.Fliplr(0.5),
 #     iaa.Flipud(0.5),
 #     iaa.Affine(rotate=iap.DiscreteUniform(0, 3) * 90, cval=(0, 0, 255)),
-    iaa.GaussianBlur(sigma=(0.0, 2.0)),
+#     iaa.GaussianBlur(sigma=(0.0, 1.0)),
     iaa.CropAndPad(px=20, pad_cval=255),
-    iaa.CropAndPad(percent=(-0.20, 0.20), pad_cval=255),
+    iaa.CropAndPad(percent=(0,
+                            (-0.20, 0.20),
+                            (-0.20, 0.20),
+                            0),
+                            pad_cval=255),
 ])
 
 fake_imgaug_pipeline = iaa.Sequential([])

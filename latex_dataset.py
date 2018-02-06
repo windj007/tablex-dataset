@@ -1,7 +1,7 @@
 import subprocess, os, glob, tempfile, sys, TexSoup, pdfquery, \
     re, collections, numpy, cv2, json, itertools, joblib, \
     shutil, random, traceback, html, ngram, scipy.optimize, \
-    scipy.spatial, rtree
+    scipy.spatial, rtree, difflib
 from pdfquery.cache import FileCache
 from PIL import Image
 from IPython.display import display
@@ -273,12 +273,15 @@ def center_in_any(what, golds):
     return any(is_point_in_box(center, g) for g in golds)
 
 
-# Taken from http://zderadicka.eu/parsing-pdf-for-fun-and-profit-indeed-in-python/
+# Initially taken from http://zderadicka.eu/parsing-pdf-for-fun-and-profit-indeed-in-python/ and then modified
 class PdfMinerWrapper(object):
     def __init__(self, pdf_doc, pdf_pwd=""):
         self.pdf_doc = pdf_doc
         self.pdf_pwd = pdf_pwd
         self.loaded = False
+        self.index_by_page = {}
+        self.page_cache = {}
+        self.device = self.interpreter = self.pages = None
 
     def load(self):
         if self.loaded:
@@ -288,23 +291,37 @@ class PdfMinerWrapper(object):
         doc = PDFDocument(parser, password=self.pdf_pwd)
         parser.set_document(doc)
         self.doc = doc
+        self.index_by_page = {}
+        self.page_cache = {}
+
+        rsrcmgr = PDFResourceManager()
+        self.device = PDFPageAggregator(rsrcmgr,
+                                        laparams=LAParams(char_margin=0.1,
+                                                          all_texts=True))
+        self.interpreter = PDFPageInterpreter(rsrcmgr, self.device)
+        self.pages = list(PDFPage.create_pages(self.doc))
+
         self.loaded = True
-    
+
     def close(self):
         if not self.loaded:
             return
         self.fp.close()
+        self.index_by_page = {}
+        self.page_cache = {}
+        del self.device
+        del self.interpreter
+        del self.pages
+        self.device = self.interpreter = self.pages = None
         self.loaded = False
 
     def get_page(self, page_no):
         '''Returns: LTPage'''
-        rsrcmgr = PDFResourceManager()
-        laparams = LAParams(char_margin=0.1, all_texts = True)
-        device = PDFPageAggregator(rsrcmgr, laparams=laparams)
-        interpreter = PDFPageInterpreter(rsrcmgr, device)
-        page = list(PDFPage.create_pages(self.doc))[page_no]
-        interpreter.process_page(page)
-        return device.get_result(), page
+        if not page_no in self.page_cache:
+            page = self.pages[page_no]
+            self.interpreter.process_page(page)
+            self.page_cache[page_no] = (self.device.get_result(), page)
+        return self.page_cache[page_no]
 
     def get_boxes(self, page_no, gold_bboxes):
         return self.__get_boxes(self.get_page(page_no)[0], gold_bboxes)
@@ -395,7 +412,7 @@ def box_is_good(src, found, max_height_ratio=1.99, max_width_ratio=1.99, min_dic
 
 PQ_IN_BBOX = 'LTPage[pageid="{page}"] LTTextLineHorizontal:overlaps_bbox("{bbox}"), LTPage[pageid="{page}"] LTTextLineVertical:overlaps_bbox("{bbox}")'
 # PQ_IN_BBOX = 'LTPage[pageid="{page}"] LTTextLineHorizontal:in_bbox("{bbox}")'
-PQ_BBOX_PAD = numpy.array([-3, -1, 1, 1])
+PQ_BBOX_PAD = numpy.array([-1, -1, 1, 1])
 def aggregate_object_bboxes_old(pdf, page, boxes, tokens, union=True):
     raise NotImplemented()
     cb = pdf.get_page(page).cropbox
@@ -427,8 +444,7 @@ def aggregate_object_bboxes(pdf, page, boxes, tokens, union=True):
                                        for box in boxes])
     good_boxes = [convert_coords_from_pq(found_elem.bbox, cropbox)
                   for found_elem in overlapping_elems]
-
-    if union:
+    if union and good_boxes:
         return bbox_union(pdf,
                           page,
                           good_boxes,
@@ -448,26 +464,62 @@ def parse_pdf(fname):
     return pdf
 
 
-def resolve_box_intersections(boxes):
-    rindex = rtree.index.Index(interleaved=True)
-    for box_i, box in enumerate(boxes):
-        rindex.insert(box_i, box)
-    out_boxes = []
-    for cur_i, cur_box in enumerate(boxes):
-        cy1, cx1, cy2, cx2 = cur_box
-        cy = (cy2 + cy1) / 2
-        max_upper_y = None
-        for inter_i in rindex.intersection(cur_box):
-            if inter_i == cur_i:
-                continue
-            inter_box = boxes[inter_i]
-            iy1, ix1, iy2, ix2 = inter_box
-            if iy2 > cy1 and iy2 < cy:
-                if max_upper_y is None or iy2 > max_upper_y:
-                    max_upper_y = iy2 + 1e-3
-        new_cy1 = ((cy1 + max_upper_y) / 2) if not max_upper_y is None else cy1
-        out_boxes.append((new_cy1, cx1, cy2, cx2))
-    return out_boxes
+def partition_two_rectangles(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1, ix2, iy2 = (max(ax1, bx1),
+                          max(ay1, by1),
+                          min(ax2, bx2),
+                          min(ay2, by2))
+    i_area = box_area((ix1, iy1, ix2, iy2))
+    if i_area < 1e-4:
+        return [a, b]
+    result = []
+    sorted_x = sorted({ax1, ax2, bx1, bx2})
+    sorted_y = sorted({ay1, ay2, by1, by2})
+    for xi in range(len(sorted_x) - 1):
+        for yi in range(len(sorted_y) - 1):
+            cand = (sorted_x[xi],
+                    sorted_y[yi],
+                    sorted_x[xi+1],
+                    sorted_y[yi+1])
+            if box_inter_area(cand, a) > 1e-4 or box_inter_area(cand, b) > 1e-4:
+                result.append(cand)
+    return result
+
+
+def partition_many_rectangles(boxes):
+    result = { i : b for i, b in enumerate(boxes) }
+    idx = rtree.index.Rtree(interleaved=True)
+    for i, b in result.items():
+        idx.insert(i, b)
+    next_id = len(result)
+    something_new = True
+    while something_new:
+        something_new = False
+        intersects_with_any = False
+        for cur_i, cur_b in result.items():
+            intersects_with_any = False
+            for other_i in idx.intersection(cur_b):
+                if cur_i == other_i or not other_i in result:
+                    continue
+                other_b = result[other_i]
+                if box_inter_area(cur_b, other_b) < 1:
+                    continue
+                intersects_with_any = True
+                break
+            if intersects_with_any:
+                break
+
+        if intersects_with_any:
+            del result[cur_i]
+            del result[other_i]
+            something_new = True
+            for new_b in partition_two_rectangles(cur_b, other_b):
+                result[next_id] = new_b
+                idx.insert(next_id, new_b)
+                next_id += 1
+    return list(result.values())
 
 
 def pdf_latex_to_samples(paper_id,
@@ -516,8 +568,8 @@ def pdf_latex_to_samples(paper_id,
                             obj_boxes_by_page[page].extend(boxes)
                 assert len(obj_boxes_by_page) == 1
                 page, boxes = next(iter(obj_boxes_by_page.items()))
-                boxes = resolve_box_intersections(boxes)
-                assigned_boxes = reassign_boxes(pdf, page, boxes, tokens)
+                boxes = partition_many_rectangles(boxes)
+                assigned_boxes = reassign_boxes_greedy(pdf, page, boxes, tokens)
                 for part_boxes, part_tokens in zip(assigned_boxes, tokens):
                     for box in boxes_aggregator(pdf, page, part_boxes, part_tokens):
                         segments_by_page[page].append((category, box))
@@ -836,7 +888,7 @@ def get_cell_text(c):
                    for t in get_all_tokens(el, include_command_names=False))
 
 
-def assign_multiple(costs, allows_multiple, max_iter=2, max_cost=numpy.inf):
+def assign_multiple(costs, allows_multiple, max_iter=10, max_cost=numpy.inf):
     result = collections.defaultdict(set)
     unassigned_rows = numpy.arange(0, costs.shape[0], 1).astype('int')
     unassigned_cols = numpy.arange(0, costs.shape[1], 1).astype('int')
@@ -854,7 +906,7 @@ def assign_multiple(costs, allows_multiple, max_iter=2, max_cost=numpy.inf):
                 assigned_rows.add(row_i)
                 assigned_cols.add(col_i)
                 result[row_i].add(col_i)
-#                 print('assigned', iter_i, row_i, col_i, costs[row_i, col_i])
+                print('assigned', iter_i, row_i, col_i, costs[row_i, col_i])
 
         if not assigned_cols:
             break
@@ -909,44 +961,121 @@ def strict_cell_dist(cell_txt, box_txt, empty_res=100):
 def reassign_boxes(pdf, page_i, found_boxes, cells,
                    max_assign_dist=0.90, pos_factor=0.0,
                    max_em_iters=10, pos_diff_eps=1e-3,
-                   max_assign_iter=4,
-                   text_dist=strict_cell_dist):
+                   max_assign_iter=10,
+                   text_dist=multiline_ngram_dist):
     found_boxes = list(set(map(tuple, found_boxes)))
     found_boxes.sort(key=lambda b: (b[0], b[1]))
 
     cropbox = pdf.get_page(page_i-1)[1].cropbox
-    box_texts = [pdf.get_text(page_i-1,
-                              [convert_coords_to_pq(fb, cropbox) + PQ_BBOX_PAD])
+    box_texts = [pdf.get_text(page_i-1, [convert_coords_to_pq(fb, cropbox)])
                  for fb in found_boxes]
-#     print('box_texts', box_texts)
+#     print('box_texts', list(zip(range(len(box_texts)), box_texts)))
     box_centers = numpy.array([get_box_center(fb) for fb in found_boxes])
     box_centers -= box_centers.min(0)
     box_centers /= box_centers.max(0)
     mean_box_center = box_centers.mean(0)
+    max_center_dist = numpy.nan_to_num(scipy.spatial.distance.pdist(box_centers)).max()
 
     cell_texts = [''.join(t.text for t in c) for c in cells]
-#     print('cell_texts', cell_texts)
+#     print('cell_texts', list(zip(range(len(cell_texts)), cell_texts)))
     cell_allows_multiple_boxes = [r'\\' in t for t in cell_texts]
 
     text_dist = numpy.array([[text_dist(ct, bt) for bt in box_texts]
                              for ct in cell_texts])
 
-    cur_cell_centers = numpy.broadcast_to(mean_box_center.mean(0), (len(cell_texts), 2))
+    cur_mapping = assign_multiple(text_dist,
+                                  cell_allows_multiple_boxes,
+                                  max_iter=max_assign_iter,
+                                  max_cost=max_assign_dist)
     for iter_i in range(max_em_iters):
-        cur_centers_dist = numpy.nan_to_num(scipy.spatial.distance.cdist(cur_cell_centers, box_centers) ** 2)
+        cur_centers_dist = numpy.array([[min((scipy.spatial.distance.euclidean(box_center, cell_box)
+                                              for cell_box in cur_mapping[cell_i]),
+                                             default=max_center_dist)
+                                         for box_center in box_centers]
+                                        for cell_i in range(len(cell_texts))])
         cur_dist = (1 - pos_factor) * text_dist + pos_factor * cur_centers_dist
-        cur_mapping = assign_multiple(cur_dist,
+        new_mapping = assign_multiple(cur_dist,
                                       cell_allows_multiple_boxes,
                                       max_iter=max_assign_iter,
                                       max_cost=max_assign_dist)
-        new_cell_centers = numpy.array([numpy.mean([box_centers[fb_i] for fb_i in cur_mapping[cell_i]], 0)
-                                        if cur_mapping[cell_i] else mean_box_center
-                                        for cell_i in range(len(cells))])
-
-        mean_center_diff = numpy.mean((new_cell_centers - cur_cell_centers)**2)
-        if mean_center_diff <= pos_diff_eps:
+        if new_mapping == cur_mapping:
             break
-        cur_cell_centers = new_cell_centers
+        cur_mapping = new_mapping
+
     result = [[found_boxes[box_i] for box_i in cur_mapping.get(cell_i, [])]
               for cell_i in range(len(cells))]
+    return result
+
+
+def common_substring_len(a, b):
+    matcher = difflib.SequenceMatcher(r'\\'.__contains__, a=a, b=b)
+    return matcher.find_longest_match(0, len(a), 0, len(b)).size
+
+
+def reassign_boxes_greedy(pdf, page_i, found_boxes, cells, max_iters=3, ignore_out_of_cb=True):
+    found_boxes = list(set(map(tuple, found_boxes)))
+    found_boxes.sort(key=lambda b: (b[0], b[1]))
+
+    cropbox = pdf.get_page(page_i-1)[1].cropbox
+    cbx1, cby1, cbx2, cby2 = cropbox
+    box_texts = [pdf.get_text(page_i-1, [convert_coords_to_pq(fb, cropbox) + PQ_BBOX_PAD])
+                 for fb in found_boxes]
+#     print('box_texts', list(zip(range(len(box_texts)), box_texts)))
+    box_centers = numpy.array([get_box_center(fb) for fb in found_boxes])
+#     print(cropbox)
+#     print([convert_coords_to_pq(fb, cropbox) for fb in found_boxes])
+
+    cell_texts = [''.join(t.text for t in c) for c in cells]
+#     print('cell_texts', list(zip(range(len(cell_texts)), cell_texts)))
+
+    cell2boxes = [set() for _ in cells]
+    similarities = [(cell_i, box_i, sim)
+                    for cell_i, cell_txt in enumerate(cell_texts)
+                    for box_i, box_txt in enumerate(box_texts)
+#                     for bx1, by1, bx2, by2 in [convert_coords_to_pq(found_boxes[box_i], cropbox)]
+#                     if by2 <= cby2 and bx2 <= cbx2 # manage only fully visible boxes
+                    for sim in [common_substring_len(cell_txt, box_txt)]
+                    if sim > 1]
+    similarities.sort(key=lambda p: p[-1], reverse=True)
+#     print(similarities)
+
+    b_idx = collections.defaultdict(set)
+    for i, (cell_i, box_i, _) in enumerate(similarities):
+        b_idx[box_i].add(i)
+
+    assigned_boxes = set()
+    for iter_i in range(3):
+        if len(assigned_boxes) == len(found_boxes):
+            break
+
+        last_iter = iter_i == (max_iters - 1)
+
+        for i, (cell_i, box_i, sim) in enumerate(similarities):
+            if box_i in assigned_boxes:
+                continue
+            cell_boxes = cell2boxes[cell_i]
+            if len(cell_boxes) == 0:
+                cell_boxes.add(box_i)
+                assigned_boxes.add(box_i)
+#                 print('first', cell_i, cell_texts[cell_i], box_i, box_texts[box_i], sim)
+            else:
+                box_dists = { other_cell_i : min((scipy.spatial.distance.euclidean(box_centers[box_i], box_centers[cell_box_i])
+                                                  for cell_box_i in cell2boxes[other_cell_i]),
+                                                 default=numpy.inf)
+                             for other_pos_i in b_idx[box_i]
+                             for other_cell_i in [similarities[other_pos_i][0]]
+                             if len(cell2boxes[other_cell_i]) > 0 }
+                sorted_dists = sorted(box_dists.items(), key=lambda p: p[1])
+                cur_cell_dist = box_dists[cell_i]
+                closest_other_cell_i, closest_other_dist = sorted_dists[0]
+                rel_sim = sim / len(box_texts[box_i])
+                if (closest_other_cell_i == cell_i and len(box_dists) > 1 and rel_sim > 0.99) or last_iter:
+#                     print('add', cell_i, cell_texts[cell_i], box_i, box_texts[box_i], sim, rel_sim)
+                    cell_boxes.add(box_i)
+                    assigned_boxes.add(box_i)
+#                 else:
+#                     print('skip', cell_i, cell_texts[cell_i], box_i, box_texts[box_i], sim, rel_sim)
+
+    result = [[found_boxes[box_i] for box_i in cell_box_ids]
+              for cell_box_ids in cell2boxes]
     return result

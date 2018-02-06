@@ -22,7 +22,7 @@ $CMD run -ti --rm \
     -v `pwd`:/notebook \
     -v /mnt/data/rsuvorov/sources:/notebook/data/arxiv/sources \
     $BIND_PORT \
-    -m 18G \
+    -m 26G \
     --name tablex \
     --memory-swappiness 0 \
     --shm-size=8192m \

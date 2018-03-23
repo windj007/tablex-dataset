@@ -308,7 +308,7 @@ def check_generated_table(out_file):
     table = structurize_tabular_contents(tex.table.tabular)
     with open(out_file + '_0001_out.json', 'r') as f:
         boxes = json.load(f)
-    found_cells_num = sum(1 for ch, _ in boxes if ch == 2)
+    found_cells_num = sum(1 for ch, _, _ in boxes if ch == 2)
     real_cells_num = sum(1
                          for row in table.rows
                          for cell in row

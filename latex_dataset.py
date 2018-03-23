@@ -359,12 +359,19 @@ def no_bbox_aggregation(pdf, page, boxes, tokens):
     return boxes
 
 
+PQ_BBOX_PAD = numpy.array([-1, -1, 1, 1])
+
 def bbox_union(pdf, page, boxes, tokens):
     boxes = list(boxes)
     if len(boxes) == 0:
         return []
+    cropbox = pdf.get_page(page - 1)[1].cropbox
+    texts = [pdf.get_text(page - 1,
+                          [convert_coords_to_pq(box, cropbox) + PQ_BBOX_PAD])
+             for box in boxes]
     y1s, x1s, y2s, x2s = zip(*boxes)
-    return [[min(y1s), min(x1s), max(y2s), max(x2s)]]
+    result = (min(y1s), min(x1s), max(y2s), max(x2s))
+    return [(result, list(zip(boxes, texts)))]
 
 
 def convert_coords_to_pq(box, cropbox):
@@ -410,38 +417,11 @@ def box_is_good(src, found, max_height_ratio=1.99, max_width_ratio=1.99, min_dic
     return dice >= min_dice
 
 
-PQ_IN_BBOX = 'LTPage[pageid="{page}"] LTTextLineHorizontal:overlaps_bbox("{bbox}"), LTPage[pageid="{page}"] LTTextLineVertical:overlaps_bbox("{bbox}")'
-# PQ_IN_BBOX = 'LTPage[pageid="{page}"] LTTextLineHorizontal:in_bbox("{bbox}")'
-PQ_BBOX_PAD = numpy.array([-1, -1, 1, 1])
-def aggregate_object_bboxes_old(pdf, page, boxes, tokens, union=True):
-    raise NotImplemented()
-    cb = pdf.get_page(page).cropbox
-    good_boxes = []
-    for src_box in boxes:
-        overlapping_elems = pdf.pq(
-            PQ_IN_BBOX.format(page=page,
-                              bbox=', '.join(map(str,
-                                                 convert_coords_to_pq(numpy.array(src_box) + PQ_BBOX_PAD,
-                                                                      cb)))))
-        for found_elem in overlapping_elems:
-            found_box = convert_coords_from_pq(get_pg_elem_bbox(found_elem), cb)
-            if box_is_good(src_box, found_box):
-                good_boxes.append(found_box)
-
-    if union:
-        return bbox_union(pdf,
-                          page,
-                          good_boxes,
-                          tokens)
-    else:
-        return good_boxes
-
-
 def aggregate_object_bboxes(pdf, page, boxes, tokens, union=True):
     cropbox = pdf.get_page(page - 1)[1].cropbox
-    overlapping_elems = pdf.get_boxes(page - 1,
-                                      [convert_coords_to_pq(box, cropbox) + PQ_BBOX_PAD
-                                       for box in boxes])
+    overlapping_elems = list(pdf.get_boxes(page - 1,
+                                           [convert_coords_to_pq(box, cropbox) + PQ_BBOX_PAD
+                                            for box in boxes]))
     good_boxes = [convert_coords_from_pq(found_elem.bbox, cropbox)
                   for found_elem in overlapping_elems]
     if union and good_boxes:
@@ -450,7 +430,11 @@ def aggregate_object_bboxes(pdf, page, boxes, tokens, union=True):
                           good_boxes,
                           tokens)
     else:
-        return good_boxes
+        return [(b,
+                 [b,
+                  pdf.get_text(page - 1,
+                               [convert_coords_to_pq(b, cropbox) + PQ_BBOX_PAD])])
+                for b in good_boxes]
 
 
 def aggregate_object_bboxes_no_union(pdf, page, boxes, tokens):
@@ -522,6 +506,12 @@ def partition_many_rectangles(boxes):
     return list(result.values())
 
 
+def json_encoder_default_for_numpy(o):
+    if isinstance(o, numpy.ndarray):
+        return o.tolist()
+    raise TypeError()
+
+
 def pdf_latex_to_samples(paper_id,
                          wd,
                          our_latex_file,
@@ -553,8 +543,11 @@ def pdf_latex_to_samples(paper_id,
                         obj_boxes_by_page[page].extend(boxes)
 
                 for page, boxes in obj_boxes_by_page.items():
-                    for box in boxes_aggregator(pdf, page, boxes, tokens):
-                        segments_by_page[page].append((category, box))
+                    cropbox = pdf.get_page(page - 1)[1].cropbox
+                    for box, atom_boxes_with_texts in boxes_aggregator(pdf, page, boxes, tokens):
+                        segments_by_page[page].append((category,
+                                                       box,
+                                                       atom_boxes_with_texts))
             else:
                 # in this case obj and tokens are lists of lists
                 obj_boxes_by_page = collections.defaultdict(list)
@@ -571,8 +564,10 @@ def pdf_latex_to_samples(paper_id,
                 boxes = partition_many_rectangles(boxes)
                 assigned_boxes = reassign_boxes_greedy(pdf, page, boxes, tokens)
                 for part_boxes, part_tokens in zip(assigned_boxes, tokens):
-                    for box in boxes_aggregator(pdf, page, part_boxes, part_tokens):
-                        segments_by_page[page].append((category, box))
+                    for box, atom_boxes_with_texts in boxes_aggregator(pdf, page, part_boxes, part_tokens):
+                        segments_by_page[page].append((category,
+                                                       box,
+                                                       atom_boxes_with_texts))
                 for group_category, group_elems in groupings:
                     group_boxes = [box
                                    for elem_i in group_elems
@@ -581,8 +576,10 @@ def pdf_latex_to_samples(paper_id,
                                     for elem_i in group_elems
                                     for tok_list in tokens
                                     for tok in tok_list]
-                    for box in boxes_aggregator(pdf, page, group_boxes, group_tokens):
-                        segments_by_page[page].append((group_category, box))
+                    for box, atom_boxes_with_texts in boxes_aggregator(pdf, page, group_boxes, group_tokens):
+                        segments_by_page[page].append((group_category,
+                                                       box,
+                                                       atom_boxes_with_texts))
 
         shutil.copy2(our_latex_file,
                      os.path.join(out_dir,
@@ -590,7 +587,7 @@ def pdf_latex_to_samples(paper_id,
         for page, segments_with_categories in segments_by_page.items():
             markup = [(cat,
                        (numpy.array(box) * POINTS_TO_PIXELS_FACTOR).astype('int'))
-                      for cat, box in segments_with_categories]
+                      for cat, box, atom_boxes_with_texts in segments_with_categories]
 
             page_img = load_image_opaque(page_files[page - 1])
 
@@ -602,7 +599,9 @@ def pdf_latex_to_samples(paper_id,
                                       '{}_{:04d}_out.png'.format(paper_id, page)))
             with open(os.path.join(out_dir,
                                    '{}_{:04d}_out.json'.format(paper_id, page)), 'w') as f:
-                json.dump(segments_with_categories, f)
+                json.dump(segments_with_categories,
+                          f,
+                          default=json_encoder_default_for_numpy)
             mask = make_demo_mask(page_img, markup)
             mask.save(os.path.join(out_dir,
                                    '{}_{:04d}_demo.png'.format(paper_id, page)))

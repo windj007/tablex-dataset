@@ -24,8 +24,9 @@ def load_image_with_boxes(img_id, mode='L'):
 
 
 def prepare_img_boxes_for_nn_crop(img, boxes, shape=(800, 400)):
-    cats, just_boxes = zip(*boxes)
+    cats, just_boxes, box_info = zip(*boxes)
     cats = numpy.array(cats)
+    
     just_boxes = numpy.array(just_boxes) * POINTS_TO_PIXELS_FACTOR
     just_boxes = just_boxes[:, [1, 0, 3, 2]] # x1, y1, x2, y2
     cropbox = numpy.array((just_boxes[:, 0].min(),
@@ -42,14 +43,32 @@ def prepare_img_boxes_for_nn_crop(img, boxes, shape=(800, 400)):
                             (shape[0], shape[1], shape[0], shape[1]))
     boxes_area = (just_boxes[:, 2] - just_boxes[:, 0]) * (just_boxes[:, 3] - just_boxes[:, 1])
     good_boxes = numpy.where(boxes_area > 0)[0]
+
+    atom_boxes, atom_box_texts = zip(*{(tuple(b), t)
+                                       for box_with_text_lst in box_info
+                                       for b, t in box_with_text_lst})
+    atom_boxes = numpy.array(atom_boxes) * POINTS_TO_PIXELS_FACTOR
+    atom_boxes = atom_boxes[:, [1, 0, 3, 2]] # x1, y1, x2, y2
+    atom_boxes -= cropbox[[0, 1, 0, 1]]
+    atom_boxes = numpy.clip(atom_boxes,
+                            (0, 0, 0, 0),
+                            (shape[0], shape[1], shape[0], shape[1]))
+    atom_box_area = (atom_boxes[:, 2] - atom_boxes[:, 0]) * (atom_boxes[:, 3] - atom_boxes[:, 1])
+    good_atom_boxes = numpy.where(atom_box_area > 0)[0]
+    atom_boxes = atom_boxes[good_atom_boxes]
+    atom_box_texts = numpy.array(atom_box_texts)[good_atom_boxes]
+
     return (numpy.array(res_in_img).astype('float32'),
             cats[good_boxes],
-            just_boxes[good_boxes])
+            just_boxes[good_boxes],
+            atom_box_texts,
+            atom_boxes)
 
 
 def prepare_img_boxes_for_nn_scale(img, boxes, shape=(850, 1100)):
-    cats, just_boxes = zip(*boxes)
+    cats, just_boxes, box_info = zip(*boxes)
     cats = numpy.array(cats)
+
     just_boxes = numpy.array(just_boxes) * POINTS_TO_PIXELS_FACTOR
     just_boxes = just_boxes[:, [1, 0, 3, 2]] # x1, y1, x2, y2
 
@@ -61,9 +80,19 @@ def prepare_img_boxes_for_nn_scale(img, boxes, shape=(850, 1100)):
         buf.paste(res_in_img)
         res_in_img = buf
 
+    atom_boxes, atom_box_texts = zip(*{(tuple(b), t)
+                                       for box_with_text_lst in box_info
+                                       for b, t in box_with_text_lst})
+    atom_boxes = numpy.array(atom_boxes) * POINTS_TO_PIXELS_FACTOR
+    atom_boxes = atom_boxes[:, [1, 0, 3, 2]] # x1, y1, x2, y2
+    atom_boxes *= scale_ratio
+    just_boxes *= scale_ratio
+    
     return (numpy.array(res_in_img).astype('float32'),
             cats,
-            just_boxes * scale_ratio)
+            just_boxes,
+            atom_box_texts,
+            atom_boxes)
 
 
 def filter_by_intersection(big_box, boxes_to_filter, threshold=0.97):
@@ -320,7 +349,7 @@ DET_BODY_CHANNEL_I = 1
 TOTAL_DET_CLASSES = len(DET_MASK_CHANNELS)
 def make_mask_for_nn_det(size, box_cats, boxes_on_image):
     boxes_by_cat = collections.defaultdict(list)
-    for cat, bbox in zip(box_cats, boxes_on_image.bounding_boxes):
+    for cat, bbox, _ in zip(box_cats, boxes_on_image.bounding_boxes):
         boxes_by_cat[cat].append((bbox.y1, bbox.x1, bbox.y2, bbox.x2))
     captions = boxes_by_cat[0]
     bodies = boxes_by_cat[1]
@@ -358,15 +387,13 @@ def get_cells_relation_def(neigh_type, cur_rows, cur_cols, neigh_rows, neigh_col
 INT_MASK_CHANNELS = ['body', 'cell', 'same_row_other_col', 'same_col_other_row']
 TOTAL_INT_CLASSES = len(INT_MASK_CHANNELS)
 INTERCELL_LINE_WIDTH = 10
-def make_mask_for_nn_intracell(size, box_cats, boxes_on_image):
-    result = numpy.zeros((TOTAL_INT_CLASSES, ) + size, dtype='float32')
-
+def make_mask_for_nn_intracell(size, box_cats, boxes_on_image, total_classes=TOTAL_INT_CLASSES):
     boxes_by_cat = collections.defaultdict(list)
     for cat, bbox in zip(box_cats, boxes_on_image.bounding_boxes):
         boxes_by_cat[cat].append((bbox.y1, bbox.x1, bbox.y2, bbox.x2))
 
     if len(boxes_by_cat[1]) == 0:
-        return result
+        return numpy.zeros((total_classes, ) + size, dtype='float32')
 
     body = get_biggest_box(boxes_by_cat[1])
     cells = boxes_by_cat[2]
@@ -380,7 +407,7 @@ def make_mask_for_nn_intracell(size, box_cats, boxes_on_image):
 
     boxes_by_channel = [[body],
                         [shrink_box(c) for c in cells]]
-    result = make_mask_for_nn_base(size, TOTAL_INT_CLASSES, boxes_by_channel)
+    result = make_mask_for_nn_base(size, total_classes, boxes_by_channel)
 
     grid = make_grid(cells)
     for i, cur_box in enumerate(cells):
@@ -415,12 +442,33 @@ def make_mask_for_nn_intracell(size, box_cats, boxes_on_image):
     return result
 
 
+def make_mask_for_nn_intracell_ext(size, box_cats, boxes_on_image,
+                                   atom_box_texts, atom_boxes,
+                                   vocab, max_chars_per_pixel=1):
+    main_mask = make_mask_for_nn_intracell(size, box_cats, boxes_on_image)
+    atom_boxes = [(bbox.y1, bbox.x1, bbox.y2, bbox.x2) for bbox in atom_boxes.bounding_boxes]
+    atom_boxes_mask = make_mask_for_nn_base(size, 1, [atom_boxes])
+
+    txt_idx = numpy.zeros((max_chars_per_pixel,) + size, dtype='uint32')
+    for box_txt, box in zip(atom_box_texts, atom_boxes):
+        y1, x1, y2, x2 = (int(math.floor(box[0])),
+                          int(math.floor(box[1])),
+                          int(math.ceil(box[2])),
+                          int(math.ceil(box[3])))
+        char_codes = list(vocab[c] for c in box_txt if c in vocab)
+        txt_idx[:min(len(char_codes), max_chars_per_pixel), y1:y2, x1:x2] = char_codes[:max_chars_per_pixel]
+    return (main_mask,
+            atom_boxes_mask,
+            txt_idx)
+
+
 MASK_COLORS = numpy.array([
     [255,   0,   0],
     [  0, 255,   0],
     [  0,   0, 255],
     [255, 255,   0],
     [255,   0, 255],
+    [0,   255, 255],
 ])
 def mask_to_img(mask, color_offset=0, fixed_norm=True):
     norm = float(mask.shape[0]) if fixed_norm else numpy.expand_dims(mask.sum(0), -1)
@@ -439,8 +487,9 @@ def calc_loss_weights(mask, channels=None, edge_add_weight=10.0, laplacian_ksize
                                                  cv2.CV_32F,
                                                  ksize=laplacian_ksize))
             edges = numpy.where(edges > edge_th, 1, 0)
+            ext_edges = numpy.clip(edges - mask[sample_i, channel_i], 0, 1)
             if edges.max() > 0:
-                result[sample_i, channel_i] += edge_add_weight * edges
+                result[sample_i, channel_i] += edge_add_weight * ext_edges
     return result
 
 
@@ -483,9 +532,13 @@ def my_augment_bounding_boxes(augmenter, bounding_boxes_on_images, boxes_cats_by
 
 
 def prepare_det_batch(batch_image_ids, augmenter, out_shape=(800, 1024)):
-    images, box_cats, boxes = zip(*[prepare_img_boxes_for_nn_scale(*load_image_with_boxes(img_id),
-                                                                   shape=out_shape)
-                                    for img_id in batch_image_ids])
+    (images,
+     box_cats,
+     boxes,
+     atom_box_texts,
+     atom_boxes) = zip(*[prepare_img_boxes_for_nn_scale(*load_image_with_boxes(img_id),
+                                                        shape=out_shape)
+                         for img_id in batch_image_ids])
 
     det = augmenter.to_deterministic() if not augmenter.deterministic else augseq
 
@@ -517,9 +570,13 @@ def prepare_det_batch(batch_image_ids, augmenter, out_shape=(800, 1024)):
 
 INT_CHANNEL_LOSS_WEIGHTS = numpy.array([1.0, 1.5, 1.0, 1.0], dtype='float32').reshape((1, 4, 1, 1))
 def prepare_int_batch(batch_image_ids, augmenter, out_shape=(800, 400)):
-    images, box_cats, boxes = zip(*[prepare_img_boxes_for_nn_crop(*load_image_with_boxes(img_id),
-                                                                  shape=out_shape)
-                                    for img_id in batch_image_ids])
+    (images,
+     box_cats,
+     boxes,
+     atom_box_texts,
+     atom_boxes) = zip(*[prepare_img_boxes_for_nn_crop(*load_image_with_boxes(img_id),
+                                                       shape=out_shape)
+                         for img_id in batch_image_ids])
 
     det = augmenter.to_deterministic() if not augmenter.deterministic else augseq
 
@@ -552,6 +609,80 @@ def prepare_int_batch(batch_image_ids, augmenter, out_shape=(800, 400)):
             boxes_aug_lists_with_cats)
 
 
+def build_vocab(image_ids, min_count=5):
+    vocab = collections.defaultdict(int)
+    for img_id in tqdm.tqdm(image_ids):
+        _, boxes = load_image_with_boxes(img_id)
+        cats, just_boxes, box_info = zip(*boxes)
+        for box_lst in box_info:
+            for _, txt in box_lst:
+                vocab[txt] += 1
+
+    for w in list(vocab):
+        if vocab[w] < min_count:
+            del vocab[w]
+
+    return { w : i+1 for i, w in enumerate(sorted(vocab.keys(), key=vocab.__getitem__, reverse=True)) }
+
+
+def prepare_int_ext_batch(batch_image_ids, augmenter, vocab, out_shape=(800, 400)):
+    (images,
+     box_cats,
+     boxes,
+     atom_box_texts,
+     atom_boxes) = zip(*[prepare_img_boxes_for_nn_crop(*load_image_with_boxes(img_id),
+                                                       shape=out_shape)
+                         for img_id in batch_image_ids])
+
+    det = augmenter.to_deterministic() if not augmenter.deterministic else augseq
+
+    images_aug = det.augment_images(numpy.array(images).astype('uint8')).astype('float32') / 255
+
+    boxes = [ia.BoundingBoxesOnImage([ia.BoundingBox(*box)
+                                      for box in img_boxes],
+                                     img.shape)
+             for img, img_boxes in zip(images, boxes)]
+    boxes_aug_with_cats = my_augment_bounding_boxes(det, boxes, box_cats)
+
+    atom_boxes = [ia.BoundingBoxesOnImage([ia.BoundingBox(*box)
+                                           for box in img_atom_boxes],
+                                          img.shape)
+                  for img, img_atom_boxes in zip(images, atom_boxes)]
+    atom_boxes_aug_with_texts = my_augment_bounding_boxes(det, atom_boxes, atom_box_texts)
+
+    (out_mask,
+     atom_boxes_mask,
+     txt_mask) = map(numpy.array,
+                     zip(*[make_mask_for_nn_intracell_ext(img.shape,
+                                                          img_box_cats,
+                                                          img_boxes,
+                                                          img_atom_box_texts,
+                                                          img_atom_boxes,
+                                                          vocab)
+                           for img_name, img, (img_boxes, img_box_cats), (img_atom_boxes, img_atom_box_texts)
+                           in zip(batch_image_ids, images_aug, boxes_aug_with_cats, atom_boxes_aug_with_texts)]))
+#     atom_boxes_mask[:] = 0 # !!!!!!!! delete this after debug
+
+    boxes_aug_lists_with_cats = []
+    for img_boxes, img_box_cats in boxes_aug_with_cats:
+        img_boxes_with_cats = collections.defaultdict(list)
+        for b, c in zip(img_boxes.bounding_boxes, img_box_cats):
+            img_boxes_with_cats[c-1].append((b.y1, b.x1, b.y2, b.x2)) # we throw away 0 category
+        boxes_aug_lists_with_cats.append(img_boxes_with_cats)
+
+    out_mask[:, 0] = 0
+    out_mask[:, 2] = 0
+    out_mask[:, 3] = 0
+    return (batch_image_ids,
+            numpy.concatenate([numpy.expand_dims(numpy.array(images_aug), 1),
+                               atom_boxes_mask],
+                              axis=1),
+            txt_mask.astype('int64'),
+            out_mask,
+            calc_loss_weights(out_mask, channels=[1]) * INT_CHANNEL_LOSS_WEIGHTS,
+            boxes_aug_lists_with_cats)
+
+
 def data_gen(image_ids, augmenter, batch_gen_func=prepare_int_batch, batch_size=32):
     while True:
         yield batch_gen_func(numpy.random.choice(image_ids, size=batch_size),
@@ -559,10 +690,12 @@ def data_gen(image_ids, augmenter, batch_gen_func=prepare_int_batch, batch_size=
 
 
 class SegmDataset(Dataset):
-    def __init__(self, all_image_ids, augmenter, batch_gen_func):
+    def __init__(self, all_image_ids, augmenter, batch_gen_func, *batch_gen_args, **batch_gen_kwargs):
         self.all_image_ids = all_image_ids
         self.augmenter = augmenter
         self.batch_gen_func = batch_gen_func
+        self.batch_gen_args = batch_gen_args
+        self.batch_gen_kwargs = batch_gen_kwargs
 
     def __len__(self):
         return len(self.all_image_ids)
@@ -573,10 +706,42 @@ class SegmDataset(Dataset):
          mask,
          loss_weights,
          boxes_aug) = self.batch_gen_func([self.all_image_ids[i]],
-                                          self.augmenter)
+                                          self.augmenter,
+                                          *self.batch_gen_args,
+                                          **self.batch_gen_kwargs,)
         boxes_aug_str = pickle.dumps(boxes_aug[0])
         return (batch_image_ids,
                 in_img[0],
+                mask[0],
+                loss_weights[0],
+                boxes_aug_str)
+
+
+class SegmExtDataset(Dataset):
+    def __init__(self, all_image_ids, augmenter, batch_gen_func, *batch_gen_args, **batch_gen_kwargs):
+        self.all_image_ids = all_image_ids
+        self.augmenter = augmenter
+        self.batch_gen_func = batch_gen_func
+        self.batch_gen_args = batch_gen_args
+        self.batch_gen_kwargs = batch_gen_kwargs
+
+    def __len__(self):
+        return len(self.all_image_ids)
+
+    def __getitem__(self, i):
+        (batch_image_ids,
+         in_img,
+         txt_mask,
+         mask,
+         loss_weights,
+         boxes_aug) = self.batch_gen_func([self.all_image_ids[i]],
+                                          self.augmenter,
+                                          *self.batch_gen_args,
+                                          **self.batch_gen_kwargs,)
+        boxes_aug_str = pickle.dumps(boxes_aug[0])
+        return (batch_image_ids,
+                in_img[0],
+                txt_mask[0],
                 mask[0],
                 loss_weights[0],
                 boxes_aug_str)
